@@ -1,0 +1,6 @@
+{
+  "name": "Pratama Abadi Sentosa Dashboard",
+  "description": "A dashboard visualizing fleet unit maintenance data sourced from Google Sheets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
