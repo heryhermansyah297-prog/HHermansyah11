@@ -481,13 +481,115 @@ export default function UnitDashboard() {
   // Spotlight Modal State
   const [selectedUnit, setSelectedUnit] = useState<UnitData | null>(null);
 
+  const normalizeGasData = (rawData: any): UnitData[] => {
+    const normalizeKey = (key: string): string => {
+      const norm = key.toLowerCase()
+        .replace(/[^a-z0-9%\s]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      
+      if (norm.includes('sn unit') || norm.includes('snunit')) return 'snUnit';
+      if (norm === 'model') return 'model';
+      if (norm.includes('issue description') || norm.includes('issue')) return 'issueDescription';
+      if (norm === 'location') return 'location';
+      if (norm.includes('unit status') || norm.includes('unitstatus')) return 'unitStatus';
+      if (norm.includes('smu to run') || norm.includes('smutorun')) return 'smuToRun';
+      if (norm === '%' || norm.includes('percent') || norm.includes('persen')) return 'percent';
+      if (norm.includes('planned smu') || norm.includes('plannedsmu')) return 'plannedSmu';
+      if (norm.includes('planned date') || norm.includes('planneddate')) return 'plannedDate';
+      if (norm.includes('last date service') || norm.includes('lastdate')) return 'lastDateService';
+      if (norm.includes('last service smu') || norm.includes('lastservice')) return 'lastServiceSmu';
+      if (norm.includes('averang') || norm.includes('average')) return 'averageUnitRun';
+      if (norm.includes('sr number') || norm.includes('srnumber')) return 'srNumber';
+      if (norm.includes('sr date') || norm.includes('srdate')) return 'srDate';
+      if (norm.includes('sr aging') || norm.includes('sraging')) return 'srAging';
+      if (norm.includes('wo number') || norm.includes('wonumber')) return 'woNumber';
+      if (norm.includes('id ticked') || norm.includes('idticked') || norm.includes('id ticket') || norm.includes('idticket')) return 'idTicked';
+      if (norm.includes('job status') || norm.includes('jobstatus')) return 'jobStatus';
+      
+      return key.replace(/\s+(.)/g, (m, chr) => chr.toUpperCase()).replace(/\s+/g, '');
+    };
+
+    let items = rawData;
+    if (rawData && !Array.isArray(rawData) && typeof rawData === 'object') {
+      const possibleKeys = ['data', 'units', 'rows', 'sheet', 'values'];
+      for (const k of possibleKeys) {
+        if (Array.isArray((rawData as any)[k])) {
+          items = (rawData as any)[k];
+          break;
+        }
+      }
+      if (!Array.isArray(items)) {
+        for (const k of Object.keys(rawData)) {
+          if (Array.isArray((rawData as any)[k])) {
+            items = (rawData as any)[k];
+            break;
+          }
+        }
+      }
+    }
+
+    if (!Array.isArray(items)) return [];
+
+    let parsedUnits: any[] = [];
+
+    if (items.length > 0 && Array.isArray(items[0])) {
+      let headerIndex = -1;
+      for (let i = 0; i < Math.min(items.length, 5); i++) {
+        const rowStr = items[i].map((c: any) => String(c).toLowerCase()).join('|');
+        if (rowStr.includes('unit') || rowStr.includes('sn') || rowStr.includes('model') || rowStr.includes('location')) {
+          headerIndex = i;
+          break;
+        }
+      }
+      if (headerIndex === -1) headerIndex = 0;
+      const headers = items[headerIndex].map((h: any) => String(h).trim());
+      const dataRows = items.slice(headerIndex + 1);
+
+      parsedUnits = dataRows.map((row) => {
+        const obj: any = {};
+        headers.forEach((header, colIndex) => {
+          if (!header) return;
+          const normKey = normalizeKey(header);
+          const rawVal = row[colIndex];
+          obj[normKey] = rawVal !== undefined && rawVal !== null ? String(rawVal).trim() : '';
+        });
+        return obj;
+      });
+    } else {
+      parsedUnits = items.map((item: any) => {
+        if (typeof item !== 'object' || item === null) return {};
+        const normalizedItem: any = {};
+        Object.keys(item).forEach((key) => {
+          const normKey = normalizeKey(key);
+          const rawVal = item[key];
+          normalizedItem[normKey] = rawVal !== undefined && rawVal !== null ? String(rawVal).trim() : '';
+        });
+        return normalizedItem;
+      });
+    }
+
+    return parsedUnits.filter((u: any) => {
+      if (!u.snUnit || u.snUnit.toLowerCase().includes('sn unit') || u.snUnit.trim() === '') return false;
+      if (u.snUnit.includes('PRATAMA ABADI') || u.snUnit.includes('SENTOSA')) return false;
+      return true;
+    }) as UnitData[];
+  };
+
   const fetchConfig = async () => {
     try {
+      // 1. Try to read from localStorage first as a reliable client-side fallback
+      const localGasUrl = localStorage.getItem('uniquip_gas_url');
+      if (localGasUrl) {
+        setGasUrl(localGasUrl);
+      }
+      
       const res = await fetch('/api/config');
       if (res.ok) {
         const data = await res.json();
         if (data && data.gasUrl) {
           setGasUrl(data.gasUrl);
+          localStorage.setItem('uniquip_gas_url', data.gasUrl);
         }
       }
     } catch (err) {
@@ -499,12 +601,43 @@ export default function UnitDashboard() {
     try {
       setRefreshing(true);
       setError(null);
-      const res = await fetch('/api/units');
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || 'Failed to fetch machinery unit data.');
+      
+      let data: any[] | null = null;
+      let fetchError: any = null;
+
+      // Try fetching from Node API proxy first
+      try {
+        const res = await fetch('/api/units');
+        if (res.ok) {
+          data = await res.json();
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          fetchError = new Error(errData.error || 'backend returned error status');
+        }
+      } catch (err) {
+        fetchError = err;
       }
-      const data = await res.json();
+
+      // If backend failed, try direct fetch from GAS URL client-side
+      const activeUrl = gasUrl || localStorage.getItem('uniquip_gas_url') || '';
+      if (!data && activeUrl) {
+        try {
+          console.log("Attempting direct client-side GAS fetch from:", activeUrl);
+          const response = await fetch(activeUrl);
+          if (response.ok) {
+            const rawData = await response.json();
+            data = normalizeGasData(rawData);
+            fetchError = null; // Clear backend error if direct fetch succeeded
+          }
+        } catch (directErr) {
+          console.error('Direct GAS fetch failed:', directErr);
+        }
+      }
+
+      if (!data) {
+        throw fetchError || new Error('Gagal memuat data dari semua sumber. Hubungkan url integrasi via menu Google Sheets.');
+      }
+
       const rawUnits = Array.isArray(data) ? data : [];
 
       // Load latest overrides from localStorage to bypass potential React state closure delays
@@ -742,14 +875,24 @@ export default function UnitDashboard() {
     try {
       setSaveLoading(true);
       setSaveSuccess(false);
-      const res = await fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gasUrl })
-      });
-      if (!res.ok) {
-        throw new Error('Gagal menyimpan URL integrasi.');
+      
+      // Save to localStorage regardless so it ALWAYS succeeds client-side
+      localStorage.setItem('uniquip_gas_url', gasUrl);
+
+      // Attempt to save to backend config file
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gasUrl })
+        });
+        if (!res.ok) {
+          console.warn('Backend API config returned error, using localStorage fallback instead.');
+        }
+      } catch (backendError) {
+        console.warn('Backend API unavailable. Configured directly on client-side:', backendError);
       }
+
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
       fetchData();
@@ -976,57 +1119,93 @@ export default function UnitDashboard() {
         return;
       }
 
-      let successCount = 0;
-      let failCount = 0;
+      // We package the units to push inside a bulk sync payload
+      const payload = {
+        action: 'bulk_sync',
+        units: unitsToPush
+      };
 
-      // Loop and synchronously push each record to Google Sheets
-      for (const unit of unitsToPush) {
-        try {
-          const res = await fetch('/api/units/update', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(unit),
-          });
-          
-          if (!res.ok) {
-            throw new Error('Rejected');
+      let success = false;
+      let errorMsg = '';
+
+      // 1. Try to push via the Node backend proxy
+      try {
+        const res = await fetch('/api/units/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) {
+          const resData = await res.json().catch(() => ({}));
+          if (resData && resData.success !== false) {
+            success = true;
+          } else {
+            errorMsg = resData.error || 'Ditolak oleh Google Apps Script';
           }
-          
-          // Successful update, remove from local unsynced lists
-          currentUnsynced = currentUnsynced.filter(x => x !== unit.snUnit);
-          delete currentOverrides[unit.snUnit];
-          successCount++;
-          
-          // Introduce a short delay to accommodate GAS processing
-          await new Promise(resolve => setTimeout(resolve, 500));
-        } catch (err) {
-          console.error(`Gagal push unit ${unit.snUnit}:`, err);
-          failCount++;
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          errorMsg = errData.error || 'Server error';
+        }
+      } catch (err: any) {
+        console.warn('Backend proxy update failed. Retrying with direct GAS request.', err);
+        errorMsg = err.message || '';
+      }
+
+      // 2. Client-side fallback: Try to push direct to GAS URL if node request didn't succeed
+      const activeUrl = gasUrl || localStorage.getItem('uniquip_gas_url') || '';
+      if (!success && activeUrl) {
+        try {
+          console.log("Direct client-side GAS bulk push to:", activeUrl);
+          const response = await fetch(activeUrl, {
+            method: 'POST',
+            body: JSON.stringify(payload)
+          });
+          if (response.ok) {
+            const resData = await response.json();
+            if (resData && resData.success !== false) {
+              success = true;
+            } else {
+              errorMsg = resData.error || 'Ditolak oleh Google Apps Script (Direct)';
+            }
+          }
+        } catch (directErr: any) {
+          console.error('Direct GAS update failed:', directErr);
+          errorMsg = directErr.message || 'Error koneksi jaringan langsung';
         }
       }
 
-      setUnsyncedSns(currentUnsynced);
-      localStorage.setItem('uniquip_unsynced_sns', JSON.stringify(currentUnsynced));
-      
-      setLocalOverrides(currentOverrides);
-      localStorage.setItem('uniquip_local_overrides', JSON.stringify(currentOverrides));
+      if (success) {
+        // Successful bulk update, clear local unsynced lists
+        if (isPushingAll) {
+          currentUnsynced = [];
+          currentOverrides = {};
+        } else {
+          const pushedSns = new Set(unitsToPush.map(u => u.snUnit));
+          currentUnsynced = currentUnsynced.filter(x => !pushedSns.has(x));
+          unitsToPush.forEach(u => delete currentOverrides[u.snUnit]);
+        }
 
-      if (failCount === 0) {
+        setUnsyncedSns(currentUnsynced);
+        localStorage.setItem('uniquip_unsynced_sns', JSON.stringify(currentUnsynced));
+        
+        setLocalOverrides(currentOverrides);
+        localStorage.setItem('uniquip_local_overrides', JSON.stringify(currentOverrides));
+
         setSyncStatusMsg({
           type: 'success',
           text: isPushingAll 
-            ? `Berhasil menyalin seluruh data (${successCount} unit) ke Google Sheet secara sinkron!`
-            : `Berhasil menyalin ${successCount} perubahan unit ke Google Sheet!`
+            ? `Berhasil menyalin seluruh data (${unitsToPush.length} unit) ke Google Sheet secara sinkron!`
+            : `Berhasil menyalin ${unitsToPush.length} perubahan unit ke Google Sheet!`
         });
+
+        // Re-fetch and align
+        fetchData();
       } else {
         setSyncStatusMsg({
           type: 'error',
-          text: `Selesai dengan kendala: ${successCount} berhasil disalin, ${failCount} gagal. Periksa koneksi Apps Script Anda.`
+          text: `Gagal menyalin data: ${errorMsg || 'Akses ditolak atau kesalahan Apps Script.'}`
         });
       }
-
-      // Re-render and load from sheet to keep clean alignment
-      fetchData();
 
     } catch (err: any) {
       console.error('Error pushing data:', err);
@@ -1078,7 +1257,7 @@ function doPost(e) {
     var headerRowIndex = 0;
     for (var i = 0; i < Math.min(data.length, 6); i++) {
       var rowStr = data[i].map(function(c) { return String(c).toLowerCase(); }).join('|');
-      if (rowStr.indexOf('unit') !== -1 || rowStr.indexOf('sn') !== -1) {
+      if (rowStr.indexOf('unit') !== -1 || rowStr.indexOf('sn') !== -1 || rowStr.indexOf('model') !== -1) {
         headerRowIndex = i;
         break;
       }
@@ -1099,21 +1278,6 @@ function doPost(e) {
     if (snColIdx === -1) {
       return ContentService.createTextOutput(JSON.stringify({ success: false, error: "Kolom SN UNIT tidak ditemukan dalam Spreadsheet." }))
         .setMimeType(ContentService.MimeType.JSON);
-    }
-    
-    // Find row by matching snUnit key
-    var snToMatch = String(payload.snUnit).trim();
-    if (!snToMatch) {
-      return ContentService.createTextOutput(JSON.stringify({ success: false, error: "Parameter snUnit bernilai kosong." }))
-        .setMimeType(ContentService.MimeType.JSON);
-    }
-    
-    var rowToEdit = -1;
-    for (var r = headerRowIndex + 1; r < data.length; r++) {
-      if (String(data[r][snColIdx]).trim() === snToMatch) {
-        rowToEdit = r;
-        break;
-      }
     }
     
     // Normalize header names to associate with payload fields
@@ -1150,6 +1314,64 @@ function doPost(e) {
     }
     
     var activeSheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    
+    // ACTION: BULK OVERWRITE SYNC DATABASE AT ONCE
+    if (payload.action === 'bulk_sync' && Array.isArray(payload.units)) {
+      var unitsList = payload.units;
+      
+      // Clear legacy values below headers
+      var lastRow = activeSheet.getLastRow();
+      if (lastRow > headerRowIndex + 1) {
+        activeSheet.getRange(headerRowIndex + 2, 1, lastRow - headerRowIndex - 1, headers.length).clearContent();
+      }
+      
+      if (unitsList.length === 0) {
+        return ContentService.createTextOutput(JSON.stringify({ success: true, message: "Database dikosongkan." }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+      
+      var rowsToInsert = [];
+      for (var u = 0; u < unitsList.length; u++) {
+        var uItem = unitsList[u];
+        var rowValues = [];
+        for (var c = 0; c < headers.length; c++) {
+          rowValues.push('');
+        }
+        
+        if (snColIdx !== -1) {
+          rowValues[snColIdx] = String(uItem.snUnit || '').trim();
+        }
+        
+        for (var prop in uItem) {
+          if (uItem.hasOwnProperty(prop) && prop !== 'snUnit') {
+            var colIdx = keyToColIdx[prop];
+            if (colIdx !== undefined) {
+              rowValues[colIdx] = uItem[prop] !== undefined && uItem[prop] !== null ? String(uItem[prop]).trim() : '';
+            }
+          }
+        }
+        rowsToInsert.push(rowValues);
+      }
+      
+      activeSheet.getRange(headerRowIndex + 2, 1, rowsToInsert.length, headers.length).setValues(rowsToInsert);
+      return ContentService.createTextOutput(JSON.stringify({ success: true, message: "Berhasil menyinkronkan seluruh database unit (" + unitsList.length + " unit) sekaligus!" }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    // ACTION: SINGLE RECORD INSERT/UPDATE
+    var snToMatch = String(payload.snUnit).trim();
+    if (!snToMatch) {
+      return ContentService.createTextOutput(JSON.stringify({ success: false, error: "Parameter snUnit bernilai kosong." }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    var rowToEdit = -1;
+    for (var r = headerRowIndex + 1; r < data.length; r++) {
+      if (String(data[r][snColIdx]).trim() === snToMatch) {
+        rowToEdit = r;
+        break;
+      }
+    }
     
     if (rowToEdit === -1) {
       // Append new unit row if not existing in sheet
