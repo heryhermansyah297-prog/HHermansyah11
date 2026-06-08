@@ -940,15 +940,57 @@ export default function UnitDashboard() {
       localStorage.setItem('uniquip_unsynced_sns', JSON.stringify(updatedUnsynced));
 
       // 3. Attempt synchronous push to Google Sheets
-      const res = await fetch('/api/units/update', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(computedForm),
-      });
+      let success = false;
+      let errorMsg = '';
 
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.error || 'Request API Google Sheet ditolak.');
+      // Try Node backend proxy first
+      try {
+        const res = await fetch('/api/units/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(computedForm),
+        });
+        if (res.ok) {
+          const resData = await res.json().catch(() => ({}));
+          if (resData && resData.success !== false) {
+            success = true;
+          } else {
+            errorMsg = resData.error || 'Ditolak oleh Google Apps Script';
+          }
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          errorMsg = errData.error || 'Server error';
+        }
+      } catch (err: any) {
+        console.warn('Backend proxy update failed. Retrying with direct GAS request.', err);
+        errorMsg = err.message || '';
+      }
+
+      // 3b. Client-side fallback: Try to push direct to GAS URL
+      const activeUrl = gasUrl || localStorage.getItem('uniquip_gas_url') || '';
+      if (!success && activeUrl) {
+        try {
+          console.log("Direct client-side GAS single push to:", activeUrl);
+          const response = await fetch(activeUrl, {
+            method: 'POST',
+            body: JSON.stringify(computedForm)
+          });
+          if (response.ok) {
+            const resData = await response.json();
+            if (resData && resData.success !== false) {
+              success = true;
+            } else {
+              errorMsg = resData.error || 'Ditolak oleh Google Apps Script (Direct)';
+            }
+          }
+        } catch (directErr: any) {
+          console.error('Direct GAS update failed:', directErr);
+          errorMsg = directErr.message || 'Error koneksi jaringan';
+        }
+      }
+
+      if (!success) {
+        throw new Error(errorMsg || 'Gagal sinkron data.');
       }
 
       // 4. Success! Clear from unsynced and local overrides list
@@ -1049,15 +1091,57 @@ export default function UnitDashboard() {
       localStorage.setItem('uniquip_unsynced_sns', JSON.stringify(updatedUnsynced));
 
       // 3. Attempt synchronous push to Google Sheets
-      const res = await fetch('/api/units/update', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(computedForm),
-      });
+      let success = false;
+      let errorMsg = '';
 
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.error || 'Request API Google Sheet ditolak.');
+      // Try Node backend proxy first
+      try {
+        const res = await fetch('/api/units/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(computedForm),
+        });
+        if (res.ok) {
+          const resData = await res.json().catch(() => ({}));
+          if (resData && resData.success !== false) {
+            success = true;
+          } else {
+            errorMsg = resData.error || 'Ditolak oleh Google Apps Script';
+          }
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          errorMsg = errData.error || 'Server error';
+        }
+      } catch (err: any) {
+        console.warn('Backend proxy update failed. Retrying with direct GAS request.', err);
+        errorMsg = err.message || '';
+      }
+
+      // 3b. Client-side fallback: Try to push direct to GAS URL
+      const activeUrl = gasUrl || localStorage.getItem('uniquip_gas_url') || '';
+      if (!success && activeUrl) {
+        try {
+          console.log("Direct client-side GAS single push to:", activeUrl);
+          const response = await fetch(activeUrl, {
+            method: 'POST',
+            body: JSON.stringify(computedForm)
+          });
+          if (response.ok) {
+            const resData = await response.json();
+            if (resData && resData.success !== false) {
+              success = true;
+            } else {
+              errorMsg = resData.error || 'Ditolak oleh Google Apps Script (Direct)';
+            }
+          }
+        } catch (directErr: any) {
+          console.error('Direct GAS update failed:', directErr);
+          errorMsg = directErr.message || 'Error koneksi jaringan';
+        }
+      }
+
+      if (!success) {
+        throw new Error(errorMsg || 'Gagal sinkron data.');
       }
 
       // 4. Success! Clear from unsynced and local overrides list
@@ -2400,7 +2484,7 @@ function doPost(e) {
                         <select
                           value={
                             editForm.jobStatus === 'IN PROGRESS' ? 'INPROGRESS' :
-                            (editForm.jobStatus === 'READY FOR USE' || editForm.jobStatus === 'COMPLETED' || editForm.jobStatus === 'NONE' || !editForm.jobStatus) ? 'RFU' : 
+                            (editForm.jobStatus === 'READY FOR USE' || editForm.jobStatus === 'COMPLETED' || !editForm.jobStatus) ? 'RFU' : 
                             editForm.jobStatus
                           }
                           onChange={(e) => setEditForm({ ...editForm, jobStatus: e.target.value })}
@@ -2410,6 +2494,7 @@ function doPost(e) {
                           <option value="WAITING PART">WAITING PART</option>
                           <option value="DELAY LABOUR">DELAY LABOUR</option>
                           <option value="INPROGRESS">INPROGRESS</option>
+                          <option value="NONE">None</option>
                         </select>
                       </div>
                       <div className="md:col-span-1">
@@ -2698,6 +2783,7 @@ function doPost(e) {
                           <option value="WAITING PART">WAITING PART</option>
                           <option value="DELAY LABOUR">DELAY LABOUR</option>
                           <option value="INPROGRESS">INPROGRESS</option>
+                          <option value="NONE">None</option>
                         </select>
                       </div>
                       <div className="md:col-span-1">
