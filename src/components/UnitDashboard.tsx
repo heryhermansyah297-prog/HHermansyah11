@@ -97,31 +97,34 @@ const parseDateSafe = (dateStr: string | null | undefined): Date | null => {
 const getPercentColorClass = (pctStr: string) => {
   const val = parseFloat(pctStr);
   if (isNaN(val)) return 'text-slate-350';
-  if (val < 40) return 'text-emerald-400 font-semibold';
-  if (val < 70) return 'text-yellow-400 font-semibold';
-  if (val < 90) return 'text-orange-400 font-bold';
-  return 'text-rose-500 font-extrabold animate-pulse';
+  
+  // Increasingly red as it approaches 100%
+  if (val >= 90) return 'text-rose-600 font-extrabold';
+  if (val >= 70) return 'text-rose-400 font-bold';
+  if (val >= 50) return 'text-orange-400 font-bold';
+  if (val >= 25) return 'text-yellow-400 font-semibold';
+  return 'text-emerald-400 font-semibold';
 };
 
 // Helper for dynamic coloring of SMU TO RUN
 const getSmuToRunColorClass = (valStr: string) => {
   const val = parseInt(valStr, 10);
   if (isNaN(val)) return 'text-slate-350';
-  if (val >= 175) return 'text-emerald-400 font-semibold';
-  if (val >= 100) return 'text-teal-400 font-semibold';
-  if (val >= 50) return 'text-yellow-400 font-semibold';
-  if (val >= 0) return 'text-orange-400 font-bold';
-  return 'text-rose-500 font-extrabold';
+  
+  // Increasingly red as smaller (or negative)
+  if (val <= 0) return 'text-rose-600 font-extrabold';
+  if (val <= 50) return 'text-rose-400 font-bold';
+  if (val <= 100) return 'text-orange-400 font-semibold';
+  if (val <= 175) return 'text-yellow-400 font-semibold';
+  return 'text-emerald-400 font-semibold';
 };
 
 // Main mathematical formula calculation runner
 const enrichUnitWithCalculations = (u: UnitData): UnitData => {
   const today = new Date();
   
-  // Average run per day (defaults to 18 jam perhari)
-  const avgRunVal = u.averageUnitRun;
-  const avgRunNum = (avgRunVal && avgRunVal.trim() !== '' && avgRunVal !== '-') ? parseFloat(avgRunVal) : 18;
-  const runRate = isNaN(avgRunNum) || avgRunNum <= 0 ? 18 : avgRunNum;
+  // 0. Average run per day fixed at 18
+  const runRate = 18;
   
   // 1. PLANNED SMU
   const lastServiceSmuVal = u.lastServiceSmu;
@@ -130,41 +133,47 @@ const enrichUnitWithCalculations = (u: UnitData): UnitData => {
   
   let plannedSmu = 'NO DATA';
   if (!isNaN(lastServiceSmuNum)) {
-    plannedSmu = String(lastServiceSmuNum + 250);
+    plannedSmu = String(Math.round(lastServiceSmuNum + 250));
   }
 
   // 2. PLANNED DATE
   const lastDateObj = parseDateSafe(u.lastDateService);
-  const daysToAdd = 250 / runRate; // e.g. 250 / 18 = 13.88 days
+  const plannedDateMsIncrement = 13.8 * 24 * 60 * 60 * 1000;
   
   let plannedDate = 'NO DATA';
   let plannedDateObj: Date | null = null;
   if (lastDateObj) {
-    const plannedDateMs = lastDateObj.getTime() + (daysToAdd * 24 * 60 * 60 * 1000);
-    plannedDateObj = new Date(plannedDateMs);
+    plannedDateObj = new Date(lastDateObj.getTime() + plannedDateMsIncrement);
     plannedDate = plannedDateObj.toISOString();
   }
+
+  const unitStatusLower = (u.unitStatus || '').trim().toLowerCase();
+  const isBreakdown = unitStatusLower === 'breakdown';
 
   // 3. PERCENT %
   let percent = '!';
   if (lastDateObj && plannedDateObj) {
-    const totalMs = plannedDateObj.getTime() - lastDateObj.getTime();
-    const elapsedMs = today.getTime() - lastDateObj.getTime();
-    
-    if (totalMs > 0) {
+    if (isBreakdown) {
+      // breakdown: stop increasing, keep previous value if possible or use last calculated
+      percent = u.percent || '0';
+    } else {
+      const totalMs = plannedDateObj.getTime() - lastDateObj.getTime();
+      const elapsedMs = today.getTime() - lastDateObj.getTime();
+      
       let pct = (elapsedMs / totalMs) * 100;
       if (pct < 0) pct = 0;
       if (pct > 100) pct = 100;
       percent = String(Math.round(pct * 10) / 10);
-    } else {
-      percent = '100';
     }
   }
 
   // 4. SMU TO RUN
   let smuToRun = '-';
   if (isLastServiceSmuFilled) {
-    if (lastDateObj) {
+    if (isBreakdown) {
+        // breakdown: stop decreasing, keep previous value
+        smuToRun = u.smuToRun || '250';
+    } else if (lastDateObj) {
       const diffMs = today.getTime() - lastDateObj.getTime();
       const elapsedDays = diffMs / (24 * 60 * 60 * 1000);
       const smuToRunNum = 250 - (elapsedDays * runRate);
@@ -183,29 +192,14 @@ const enrichUnitWithCalculations = (u: UnitData): UnitData => {
     srAging = String(elapsedDays);
   }
 
-  const unitStatusLower = (u.unitStatus || '').trim().toLowerCase();
-  const isBreakdown = unitStatusLower === 'breakdown';
-  const jobUpper = (u.jobStatus || '').trim().toUpperCase();
-  const isRfu = jobUpper === 'RFU' || jobUpper === 'READY FOR USE' || jobUpper === 'COMPLETED';
-
-  let finalPercent = percent;
-  let finalSmuToRun = smuToRun;
-
-  if (isBreakdown && !isRfu) {
-    finalPercent = '-';
-    finalSmuToRun = '-';
-  }
-
   return {
     ...u,
     plannedSmu,
     plannedDate,
-    percent: finalPercent,
-    smuToRun: finalSmuToRun,
+    percent,
+    smuToRun,
     srAging,
-    srNumber: u.srNumber,
-    woNumber: u.woNumber,
-    idTicked: u.idTicked,
+    averageUnitRun: String(runRate), // Force update to 18
   };
 };
 
