@@ -2596,8 +2596,9 @@ function doPost(e) {
                         <input
                           type="text"
                           value={editForm.lastDateService || ''}
+                          onChange={(e) => setEditForm({ ...editForm, lastDateService: e.target.value })}
                           className="w-full bg-slate-950 border border-slate-805 text-slate-300 rounded-lg p-2.5 text-xs font-mono focus:border-indigo-500 transition-all focus:ring-1 focus:ring-indigo-500"
-                          placeholder="e.g. 01/06/2026"
+                          placeholder="e.g. 2026/06/01"
                         />
                       </div>
                       <div>
