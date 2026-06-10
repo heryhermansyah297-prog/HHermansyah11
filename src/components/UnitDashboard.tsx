@@ -138,7 +138,8 @@ const enrichUnitWithCalculations = (u: UnitData): UnitData => {
 
   // 2. PLANNED DATE
   const lastDateObj = parseDateSafe(u.lastDateService);
-  const plannedDateMsIncrement = 13.8 * 24 * 60 * 60 * 1000;
+  // Calculate based on 250 jam / 18 jam/hari = 13.888 days, using 14 days for safety
+  const plannedDateMsIncrement = 14 * 24 * 60 * 60 * 1000;
   
   let plannedDate = 'NO DATA';
   let plannedDateObj: Date | null = null;
@@ -148,31 +149,36 @@ const enrichUnitWithCalculations = (u: UnitData): UnitData => {
   }
 
   const unitStatusLower = (u.unitStatus || '').trim().toLowerCase();
-  const isBreakdown = unitStatusLower === 'breakdown';
+  const isBreakdown = unitStatusLower.includes('breakdown');
 
   // 3. PERCENT %
-  let percent = '!';
-  if (lastDateObj && plannedDateObj) {
-    if (isBreakdown) {
-      // breakdown: stop increasing, keep previous value if possible or use last calculated
-      percent = u.percent || '0';
-    } else {
-      const totalMs = plannedDateObj.getTime() - lastDateObj.getTime();
-      const elapsedMs = today.getTime() - lastDateObj.getTime();
-      
-      let pct = (elapsedMs / totalMs) * 100;
-      if (pct < 0) pct = 0;
-      if (pct > 100) pct = 100;
-      percent = String(Math.round(pct * 10) / 10);
+  let percentNum = 0;
+  if (isBreakdown) {
+    // breakdown: stop increasing, keep previous value if possible or use last calculated
+    percentNum = parseFloat(u.percent || '0');
+  } else {
+    // 4. SMU TO RUNNum
+    let smuToRunNum = 250;
+    if (isLastServiceSmuFilled && lastDateObj) {
+      const diffMs = today.getTime() - lastDateObj.getTime();
+      const elapsedDays = diffMs / (24 * 60 * 60 * 1000);
+      smuToRunNum = 250 - (elapsedDays * runRate);
     }
+    
+  // Formula: ((250 - smuToRunNum) / 250) * 100
+    percentNum = ((250 - smuToRunNum) / 250) * 100;
   }
+  
+  // Clean percent
+  let percent = String(Math.round(percentNum * 10) / 10);
+  if (!lastDateObj) percent = '!'; // If no date, alert!
 
   // 4. SMU TO RUN
   let smuToRun = '-';
   if (isLastServiceSmuFilled) {
     if (isBreakdown) {
         // breakdown: stop decreasing, keep previous value
-        smuToRun = u.smuToRun || '250';
+        smuToRun = u.smuToRun && u.smuToRun !== '-' ? u.smuToRun : '250';
     } else if (lastDateObj) {
       const diffMs = today.getTime() - lastDateObj.getTime();
       const elapsedDays = diffMs / (24 * 60 * 60 * 1000);
@@ -199,7 +205,7 @@ const enrichUnitWithCalculations = (u: UnitData): UnitData => {
     percent,
     smuToRun,
     srAging,
-    averageUnitRun: String(runRate), // Force update to 18
+    averageUnitRun: '18', // Force permanently 18
   };
 };
 
@@ -419,16 +425,14 @@ export default function UnitDashboard() {
   const formatCompactDate = (dateStr: string) => {
     if (!dateStr || dateStr.trim() === '' || dateStr === '-') return '-';
     try {
-      if (dateStr.includes('T')) {
-        const date = new Error ? new Date() : new Date(dateStr);
-        // Ensure valid date parsed
-        if (!isNaN((date as Date).getTime())) {
-          return (date as Date).toLocaleDateString('id-ID', {
-            day: '2-digit',
-            month: '2-digit',
-            year: 'numeric'
-          });
-        }
+      const date = new Date(dateStr);
+      // Ensure valid date parsed
+      if (!isNaN(date.getTime())) {
+        return date.toLocaleDateString('id-ID', {
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric'
+        });
       }
     } catch (e) {
       // Return original if parsing fails
@@ -766,6 +770,7 @@ export default function UnitDashboard() {
     let runningHealthyCount = 0;
     let activeSRs = 0;
     let totalWorkOrders = 0;
+    let needServiceCount = 0;
     
     enrichedUnits.forEach(u => {
       const jobUpper = (u.jobStatus || '').trim().toUpperCase();
@@ -773,6 +778,12 @@ export default function UnitDashboard() {
       let statusLower = (u.unitStatus || '').toLowerCase();
       if (isRfu) {
         statusLower = 'running without trouble';
+      }
+
+      const smuVal = parseInt(u.smuToRun, 10);
+      const isNeedService = !isNaN(smuVal) && smuVal <= 50;
+      if (isNeedService) {
+        needServiceCount++;
       }
 
       if (statusLower.includes('breakdown')) {
@@ -793,7 +804,8 @@ export default function UnitDashboard() {
       runningTrouble: runningTroubleCount,
       runningHealthy: runningHealthyCount,
       activeSRs,
-      totalWorkOrders
+      totalWorkOrders,
+      needServiceCount
     };
   }, [enrichedUnits]);
 
@@ -1705,10 +1717,10 @@ function doPost(e) {
 
         {/* Metric 6 */}
         <div className="bg-slate-900 border border-slate-800/80 p-4 rounded-xl flex flex-col justify-between hover:border-slate-700/50 transition-all">
-          <span className="text-xs text-sky-400 font-semibold uppercase tracking-wider">Work Orders</span>
+          <span className="text-xs text-sky-400 font-semibold uppercase tracking-wider">Need Service</span>
           <div className="flex items-baseline gap-2 mt-2">
-            <span className="text-3xl font-extrabold text-sky-400">{stats.totalWorkOrders}</span>
-            <span className="text-xs text-slate-500 font-mono">Active</span>
+            <span className="text-3xl font-extrabold text-sky-400">{stats.needServiceCount}</span>
+            <span className="text-xs text-slate-500 font-mono">Units</span>
           </div>
         </div>
 
@@ -2314,7 +2326,7 @@ function doPost(e) {
                   <Calendar className="w-5 h-5 text-indigo-400" />
                   <div>
                     <span className="text-[10px] text-slate-500 uppercase font-mono block">Planned Date</span>
-                    <span className="text-xs font-semibold text-slate-250 font-mono">{selectedUnit.plannedDate || '-'}</span>
+                    <span className="text-xs font-semibold text-slate-250 font-mono">{selectedUnit.plannedDate === 'NO DATA' ? '-' : formatCompactDate(selectedUnit.plannedDate || '')}</span>
                   </div>
                 </div>
                 <div className="p-3 bg-slate-950/20 border border-slate-850 rounded-lg flex items-center gap-3">
@@ -2557,9 +2569,9 @@ function doPost(e) {
                         <label className="block text-[9px] font-bold text-slate-400 uppercase font-mono mb-1 text-emerald-450">AVG RUN HR/DAY</label>
                         <input
                           type="text"
-                          value={editForm.averageUnitRun || ''}
-                          onChange={(e) => setEditForm({ ...editForm, averageUnitRun: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-emerald-400 font-bold rounded-lg p-2 text-xs font-mono text-center transition-all"
+                          value="18"
+                          disabled
+                          className="w-full bg-slate-900/60 border border-slate-800 text-emerald-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
                         />
                       </div>
                     </div>
@@ -2580,13 +2592,12 @@ function doPost(e) {
                         />
                       </div>
                       <div>
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LAST DATE SERVICE</label>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LAST DATE SERVICE (YYYY/MM/DD)</label>
                         <input
                           type="text"
                           value={editForm.lastDateService || ''}
-                          onChange={(e) => setEditForm({ ...editForm, lastDateService: e.target.value })}
                           className="w-full bg-slate-950 border border-slate-805 text-slate-300 rounded-lg p-2.5 text-xs font-mono focus:border-indigo-500 transition-all focus:ring-1 focus:ring-indigo-500"
-                          placeholder="e.g. 2026-06-01T07:00:00.000Z"
+                          placeholder="e.g. 01/06/2026"
                         />
                       </div>
                       <div>
@@ -2848,10 +2859,9 @@ function doPost(e) {
                         <label className="block text-[9px] font-bold text-slate-400 uppercase font-mono mb-1 text-emerald-450 flex items-center justify-center gap-0.5">AVG RUN/DAY</label>
                         <input
                           type="text"
-                          placeholder="e.g. 18"
-                          value={addForm.averageUnitRun}
-                          onChange={(e) => setAddForm({ ...addForm, averageUnitRun: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-emerald-400 font-bold rounded-lg p-2 text-xs font-mono text-center transition-all"
+                          value="18"
+                          disabled
+                          className="w-full bg-slate-900/60 border border-slate-800 text-emerald-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
                         />
                       </div>
                     </div>
@@ -2872,13 +2882,13 @@ function doPost(e) {
                         />
                       </div>
                       <div>
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LAST DATE SERVICE</label>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LAST DATE SERVICE (YYYY/MM/DD)</label>
                         <input
                           type="text"
                           value={addForm.lastDateService}
                           onChange={(e) => setAddForm({ ...addForm, lastDateService: e.target.value })}
                           className="w-full bg-slate-950 border border-slate-808 text-slate-350 rounded-lg p-2.5 text-xs font-mono focus:border-indigo-500 transition-all focus:ring-1 focus:ring-indigo-500"
-                          placeholder="e.g. 2026-06-01T07:00:00.000Z"
+                          placeholder="e.g. 01/06/2026"
                         />
                       </div>
                       <div>
