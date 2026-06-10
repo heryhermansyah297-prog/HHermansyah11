@@ -61,7 +61,7 @@ async function startServer() {
       const rawData = await response.json();
       
       // Normalize key function
-      const normalizeKey = (key: string): string => {
+      const normalizeKey = (key: string, colIndex: number = -1): string => {
         const norm = key.toLowerCase()
           .replace(/[^a-z0-9%\s]/g, '')
           .replace(/\s+/g, ' ')
@@ -79,12 +79,25 @@ async function startServer() {
         if (norm.includes('last date service') || norm.includes('lastdate')) return 'lastDateService';
         if (norm.includes('last service smu') || norm.includes('lastservice')) return 'lastServiceSmu';
         if (norm.includes('averang') || norm.includes('average')) return 'averageUnitRun';
-        if (norm.includes('sr number') || norm.includes('srnumber')) return 'srNumber';
-        if (norm.includes('sr date') || norm.includes('srdate')) return 'srDate';
-        if (norm.includes('sr aging') || norm.includes('sraging')) return 'srAging';
-        if (norm.includes('wo number') || norm.includes('wonumber')) return 'woNumber';
-        if (norm.includes('id ticked') || norm.includes('idticked') || norm.includes('id ticket') || norm.includes('idticket')) return 'idTicked';
+        if (norm.includes('breakdown sr number') || norm.includes('breakdownsrnumber') || norm.includes('sr breakdown') || norm.includes('srnumberbreakdown')) return 'breakdownSrNumber';
+        if (norm.includes('breakdown sr date') || norm.includes('breakdownsrdate') || norm.includes('sr date breakdown')) return 'breakdownSrDate';
+        if (norm.includes('breakdown sr aging') || norm.includes('breakdownsraging') || norm.includes('sr aging breakdown')) return 'breakdownSrAging';
+        if (norm.includes('breakdown wo number') || norm.includes('breakdownwonumber') || norm.includes('wo breakdown') || norm.includes('wonumberbreakdown')) return 'breakdownWoNumber';
+        
+        if (norm.includes('sr number') || norm.includes('srnumber')) return colIndex >= 17 ? 'breakdownSrNumber' : 'srNumber';
+        if (norm.includes('sr date') || norm.includes('srdate')) return colIndex >= 17 ? 'breakdownSrDate' : 'srDate';
+        if (norm.includes('sr aging') || norm.includes('sraging')) return colIndex >= 17 ? 'breakdownSrAging' : 'srAging';
+        if (norm.includes('wo number') || norm.includes('wonumber')) return colIndex >= 17 ? 'breakdownWoNumber' : 'woNumber';
+        
         if (norm.includes('job status') || norm.includes('jobstatus')) return 'jobStatus';
+        if (norm.includes('id ticket') || norm.includes('idticket') || norm.includes('id ticked') || norm.includes('idticked')) return 'idTicked';
+        if (norm.includes('labour 1') || norm.includes('labour1')) return 'labour1';
+        if (norm.includes('labour 2') || norm.includes('labour2')) return 'labour2';
+        if (norm.includes('labour 3') || norm.includes('labour3')) return 'labour3';
+        if (norm.includes('labour 4') || norm.includes('labour4')) return 'labour4';
+        if (norm === 'remarks') return 'remarks';
+        if (norm.includes('hm rfu') || norm.includes('hmrfu')) return 'hmRfu';
+        if (norm.includes('lead job description') || norm.includes('leadjobdescription') || norm.includes('lead job') || norm.includes('leadjob')) return 'leadJobDescription';
         
         // Match standard format to camelCase
         return key.replace(/\s+(.)/g, (m, chr) => chr.toUpperCase()).replace(/\s+/g, '');
@@ -142,7 +155,7 @@ async function startServer() {
           const obj: any = {};
           headers.forEach((header, colIndex) => {
             if (!header) return;
-            const normKey = normalizeKey(header);
+            const normKey = normalizeKey(header, colIndex);
             const rawVal = row[colIndex];
             obj[normKey] = rawVal !== undefined && rawVal !== null ? String(rawVal).trim() : '';
           });

@@ -33,9 +33,11 @@ import {
   Copy,
   Check,
   Pencil,
+  Trash2,
   Plus,
   CloudUpload,
-  ExternalLink
+  ExternalLink,
+  Users
 } from 'lucide-react';
 
 interface UnitData {
@@ -56,8 +58,19 @@ interface UnitData {
   srDate: string;
   srAging: string;
   woNumber: string;
-  idTicked: string;
   jobStatus: string;
+  idTicked?: string;
+  labour1?: string;
+  labour2?: string;
+  labour3?: string;
+  labour4?: string;
+  remarks?: string;
+  hmRfu?: string;
+  leadJobDescription?: string;
+  breakdownSrNumber?: string;
+  breakdownSrDate?: string;
+  breakdownSrAging?: string;
+  breakdownWoNumber?: string;
 }
 
 // Helper to parse dates safely across multiple formats (e.g. ISO 8601, DD/MM/YYYY, etc.)
@@ -118,6 +131,35 @@ const getSmuToRunColorClass = (valStr: string) => {
   if (val <= 100) return 'text-orange-400 font-semibold';
   if (val <= 175) return 'text-yellow-400 font-semibold';
   return 'text-emerald-400 font-semibold';
+};
+
+// Helper to determine the next PM schedule level cycle based on the previous PM level and current SMU
+const getNextPmSchedule = (prevPm: string, currentSmuNum?: number): string => {
+  const clean = (prevPm || '').trim().toUpperCase();
+  
+  // If we have currentSmuNum, we can look at the SMU range to see what would be the next PM step in the heavy gear cycle
+  if (typeof currentSmuNum === 'number' && !isNaN(currentSmuNum)) {
+    if (clean === "PM 250 HOURS" || clean === "") {
+      const base = Math.floor(currentSmuNum / 250);
+      const nextBase = base + 1;
+      const nextBaseMod8 = nextBase % 8;
+      if (nextBaseMod8 === 1 || nextBaseMod8 === 5) return "PM 500 HOURS";
+      if (nextBaseMod8 === 3) return "PM 1000 HOURS";
+      if (nextBaseMod8 === 7) return "PM 2000 HOURS";
+      return "PM 500 HOURS"; // Fallback to PM 500 as the standard next step from 250
+    }
+    if (clean === "PM 500 HOURS" || clean === "PM 1000 HOURS" || clean === "PM 2000 HOURS") {
+      return "PM 250 HOURS";
+    }
+  }
+  
+  // Fallback sequential cycle if SMU is not provided or NaN:
+  if (clean === "PM 250 HOURS") return "PM 500 HOURS";
+  if (clean === "PM 500 HOURS") return "PM 1000 HOURS";
+  if (clean === "PM 1000 HOURS") return "PM 2000 HOURS";
+  if (clean === "PM 2000 HOURS") return "PM 250 HOURS";
+  
+  return "PM 250 HOURS";
 };
 
 // Main mathematical formula calculation runner
@@ -195,16 +237,13 @@ const enrichUnitWithCalculations = (u: UnitData): UnitData => {
   }
 
   // 5. SR AGING
-  let srAging = '-';
-  const srDateObj = parseDateSafe(u.srDate);
-  if (srDateObj) {
-    const diffMs = today.getTime() - srDateObj.getTime();
-    const elapsedDays = Math.max(0, Math.floor(diffMs / (24 * 60 * 60 * 1000)));
-    srAging = String(elapsedDays);
-  }
+  let srAging = u.srAging || '-';
+
+  // 5b. BREAKDOWN SR AGING
+  let breakdownSrAging = u.breakdownSrAging || '-';
 
   // 6. PLANNING SCHEDULE PM
-  let planSchedulePm = u.planSchedulePm || u.issueDescription || ''; // Default to existing value or issueDescription for migration
+  let planSchedulePm = u.planSchedulePm || '';
   if (isLastServiceSmuFilled && (!u.planSchedulePm || u.planSchedulePm === '')) {
     const val = lastServiceSmuNum;
     const base = Math.floor(val / 250);
@@ -229,7 +268,14 @@ const enrichUnitWithCalculations = (u: UnitData): UnitData => {
     plannedDate,
     percent,
     smuToRun,
+    srNumber: u.srNumber,
+    srDate: u.srDate,
     srAging,
+    woNumber: u.woNumber,
+    breakdownSrNumber: u.breakdownSrNumber,
+    breakdownSrDate: u.breakdownSrDate,
+    breakdownSrAging,
+    breakdownWoNumber: u.breakdownWoNumber,
     averageUnitRun: '18', // Force permanently 18
   };
 };
@@ -357,9 +403,13 @@ export default function UnitDashboard() {
     return weekOptions[0]?.key || '';
   }, [weekOptions, selectedWeekKey]);
 
+  // Active Tab View State
+  const [activeTab, setActiveTab] = useState<'pm' | 'breakdown'>('pm');
+
   // States for Editing/Updating Unit
   const [editingUnit, setEditingUnit] = useState<UnitData | null>(null);
   const [editForm, setEditForm] = useState<UnitData | null>(null);
+  const [isPmManuallyEdited, setIsPmManuallyEdited] = useState(false);
   const [editLoading, setEditLoading] = useState(false);
   const [editSuccessMsg, setEditSuccessMsg] = useState<string | null>(null);
   const [editErrorMsg, setEditErrorMsg] = useState<string | null>(null);
@@ -384,9 +434,17 @@ export default function UnitDashboard() {
     srDate: '',
     srAging: '',
     woNumber: '',
+    jobStatus: 'RFU',
     idTicked: '',
-    jobStatus: 'RFU'
+    labour1: '',
+    labour2: '',
+    labour3: '',
+    labour4: '',
+    remarks: '',
+    hmRfu: '',
+    leadJobDescription: ''
   });
+  const [isAddPmManuallyEdited, setIsAddPmManuallyEdited] = useState(false);
   const [addLoading, setAddLoading] = useState(false);
   const [addSuccessMsg, setAddSuccessMsg] = useState<string | null>(null);
   const [addErrorMsg, setAddErrorMsg] = useState<string | null>(null);
@@ -440,17 +498,23 @@ export default function UnitDashboard() {
   const [syncStatusMsg, setSyncStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showFrcReloadConfirm, setShowFrcReloadConfirm] = useState(false);
   
+  // Delete State
+  const [unitToDelete, setUnitToDelete] = useState<UnitData | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteErrorMsg, setDeleteErrorMsg] = useState<string | null>(null);
+
   // Advanced Dropdown Filter States
   const [selectedModel, setSelectedModel] = useState('ALL');
   const [selectedLocation, setSelectedLocation] = useState('ALL');
   const [selectedUnitStatus, setSelectedUnitStatus] = useState('ALL');
   const [selectedJobStatus, setSelectedJobStatus] = useState('ALL');
+  const [selectedRemarks, setSelectedRemarks] = useState('ALL');
   
   // Spotlight Modal State
   const [selectedUnit, setSelectedUnit] = useState<UnitData | null>(null);
 
   const normalizeGasData = (rawData: any): UnitData[] => {
-    const normalizeKey = (key: string): string => {
+    const normalizeKey = (key: string, colIndex: number = -1): string => {
       const norm = key.toLowerCase()
         .replace(/[^a-z0-9%\s]/g, '')
         .replace(/\s+/g, ' ')
@@ -458,6 +522,7 @@ export default function UnitDashboard() {
       
       if (norm.includes('sn unit') || norm.includes('snunit')) return 'snUnit';
       if (norm === 'model') return 'model';
+      if (norm.includes('plan schedule pm') || norm.includes('planning schedule') || norm.includes('pm schedule')) return 'planSchedulePm';
       if (norm.includes('issue description') || norm.includes('issue')) return 'issueDescription';
       if (norm === 'location') return 'location';
       if (norm.includes('unit status') || norm.includes('unitstatus')) return 'unitStatus';
@@ -468,12 +533,23 @@ export default function UnitDashboard() {
       if (norm.includes('last date service') || norm.includes('lastdate')) return 'lastDateService';
       if (norm.includes('last service smu') || norm.includes('lastservice')) return 'lastServiceSmu';
       if (norm.includes('averang') || norm.includes('average')) return 'averageUnitRun';
-      if (norm.includes('sr number') || norm.includes('srnumber')) return 'srNumber';
-      if (norm.includes('sr date') || norm.includes('srdate')) return 'srDate';
-      if (norm.includes('sr aging') || norm.includes('sraging')) return 'srAging';
-      if (norm.includes('wo number') || norm.includes('wonumber')) return 'woNumber';
-      if (norm.includes('id ticked') || norm.includes('idticked') || norm.includes('id ticket') || norm.includes('idticket')) return 'idTicked';
+      if (norm.includes('breakdown sr number') || norm.includes('breakdownsrnumber') || norm.includes('sr breakdown') || norm.includes('srnumberbreakdown')) return 'breakdownSrNumber';
+      if (norm.includes('breakdown sr date') || norm.includes('breakdownsrdate') || norm.includes('sr date breakdown')) return 'breakdownSrDate';
+      if (norm.includes('breakdown sr aging') || norm.includes('breakdownsraging') || norm.includes('sr aging breakdown')) return 'breakdownSrAging';
+      if (norm.includes('breakdown wo number') || norm.includes('breakdownwonumber') || norm.includes('wo breakdown') || norm.includes('wonumberbreakdown')) return 'breakdownWoNumber';
+      if (norm.includes('sr number') || norm.includes('srnumber')) return colIndex >= 17 ? 'breakdownSrNumber' : 'srNumber';
+      if (norm.includes('sr date') || norm.includes('srdate')) return colIndex >= 17 ? 'breakdownSrDate' : 'srDate';
+      if (norm.includes('sr aging') || norm.includes('sraging')) return colIndex >= 17 ? 'breakdownSrAging' : 'srAging';
+      if (norm.includes('wo number') || norm.includes('wonumber')) return colIndex >= 17 ? 'breakdownWoNumber' : 'woNumber';
       if (norm.includes('job status') || norm.includes('jobstatus')) return 'jobStatus';
+      if (norm.includes('id ticket') || norm.includes('idticket') || norm.includes('id ticked') || norm.includes('idticked')) return 'idTicked';
+      if (norm.includes('labour 1') || norm.includes('labour1')) return 'labour1';
+      if (norm.includes('labour 2') || norm.includes('labour2')) return 'labour2';
+      if (norm.includes('labour 3') || norm.includes('labour3')) return 'labour3';
+      if (norm.includes('labour 4') || norm.includes('labour4')) return 'labour4';
+      if (norm === 'remarks') return 'remarks';
+      if (norm.includes('hm rfu') || norm.includes('hmrfu')) return 'hmRfu';
+      if (norm.includes('lead job description') || norm.includes('leadjobdescription') || norm.includes('lead job') || norm.includes('leadjob')) return 'leadJobDescription';
       
       return key.replace(/\s+(.)/g, (m, chr) => chr.toUpperCase()).replace(/\s+/g, '');
     };
@@ -518,7 +594,7 @@ export default function UnitDashboard() {
         const obj: any = {};
         headers.forEach((header, colIndex) => {
           if (!header) return;
-          const normKey = normalizeKey(header);
+          const normKey = normalizeKey(header, colIndex);
           const rawVal = row[colIndex];
           obj[normKey] = rawVal !== undefined && rawVal !== null ? String(rawVal).trim() : '';
         });
@@ -650,12 +726,15 @@ export default function UnitDashboard() {
   useEffect(() => {
     if (editForm) {
       const computed = enrichUnitWithCalculations(editForm);
+      const shouldUpdatePlanPm = computed.planSchedulePm !== editForm.planSchedulePm && !isPmManuallyEdited;
       if (
         computed.plannedSmu !== editForm.plannedSmu ||
         computed.plannedDate !== editForm.plannedDate ||
         computed.percent !== editForm.percent ||
         computed.smuToRun !== editForm.smuToRun ||
-        computed.srAging !== editForm.srAging
+        computed.srAging !== editForm.srAging ||
+        computed.breakdownSrAging !== editForm.breakdownSrAging ||
+        shouldUpdatePlanPm
       ) {
         setEditForm({
           ...editForm,
@@ -663,21 +742,26 @@ export default function UnitDashboard() {
           plannedDate: computed.plannedDate,
           percent: computed.percent,
           smuToRun: computed.smuToRun,
-          srAging: computed.srAging
+          srAging: computed.srAging,
+          breakdownSrAging: computed.breakdownSrAging,
+          planSchedulePm: shouldUpdatePlanPm ? computed.planSchedulePm : editForm.planSchedulePm
         });
       }
     }
-  }, [editForm?.lastServiceSmu, editForm?.lastDateService, editForm?.averageUnitRun, editForm?.srDate]);
+  }, [editForm?.lastServiceSmu, editForm?.lastDateService, editForm?.averageUnitRun, editForm?.srDate, isPmManuallyEdited]);
 
   // Synchronize Add Form Calculated Fields Live!
   useEffect(() => {
     const computed = enrichUnitWithCalculations(addForm);
+    const shouldUpdatePlanPm = computed.planSchedulePm !== addForm.planSchedulePm && !isAddPmManuallyEdited;
     if (
       computed.plannedSmu !== addForm.plannedSmu ||
       computed.plannedDate !== addForm.plannedDate ||
       computed.percent !== addForm.percent ||
       computed.smuToRun !== addForm.smuToRun ||
-      computed.srAging !== addForm.srAging
+      computed.srAging !== addForm.srAging ||
+      computed.breakdownSrAging !== addForm.breakdownSrAging ||
+      shouldUpdatePlanPm
     ) {
       setAddForm({
         ...addForm,
@@ -685,10 +769,12 @@ export default function UnitDashboard() {
         plannedDate: computed.plannedDate,
         percent: computed.percent,
         smuToRun: computed.smuToRun,
-        srAging: computed.srAging
+        srAging: computed.srAging,
+        breakdownSrAging: computed.breakdownSrAging,
+        planSchedulePm: shouldUpdatePlanPm ? computed.planSchedulePm : addForm.planSchedulePm
       });
     }
-  }, [addForm.lastServiceSmu, addForm.lastDateService, addForm.averageUnitRun, addForm.srDate]);
+  }, [addForm.lastServiceSmu, addForm.lastDateService, addForm.averageUnitRun, addForm.srDate, isAddPmManuallyEdited]);
 
   // Extract unique options for filter dropdowns dynamically
   const filterOptions = useMemo(() => {
@@ -696,6 +782,7 @@ export default function UnitDashboard() {
     const locations = new Set<string>();
     const unitStatuses = new Set<string>();
     const jobStatuses = new Set<string>();
+    const remarks = new Set<string>();
 
     enrichedUnits.forEach(u => {
       if (u.model) models.add(u.model);
@@ -706,13 +793,17 @@ export default function UnitDashboard() {
       if (u.jobStatus && u.jobStatus.toLowerCase() !== 'unknown' && u.jobStatus.trim() !== '') {
         jobStatuses.add(u.jobStatus);
       }
+      if (u.remarks && u.remarks.toLowerCase() !== 'unknown' && u.remarks.trim() !== '') {
+        remarks.add(u.remarks);
+      }
     });
 
     return {
       models: Array.from(models).sort(),
       locations: Array.from(locations).sort(),
       unitStatuses: Array.from(unitStatuses).sort(),
-      jobStatuses: Array.from(jobStatuses).sort()
+      jobStatuses: Array.from(jobStatuses).sort(),
+      remarks: Array.from(remarks).sort()
     };
   }, [enrichedUnits]);
 
@@ -720,18 +811,21 @@ export default function UnitDashboard() {
   const filteredUnits = useMemo(() => {
     return enrichedUnits.filter(u => {
       // Search Box Filter
-      const searchStr = `${u.snUnit} ${u.model} ${u.location} ${u.issueDescription} ${u.srNumber} ${u.woNumber}`.toLowerCase();
+      const searchStr = `${u.snUnit} ${u.model} ${u.location} ${u.issueDescription} ${u.srNumber} ${u.woNumber} ${u.breakdownSrNumber} ${u.breakdownWoNumber}`.toLowerCase();
       const matchesSearch = searchStr.includes(searchQuery.toLowerCase());
       
       // Dropdown Filters
       const matchesModel = selectedModel === 'ALL' || u.model === selectedModel;
       const matchesLocation = selectedLocation === 'ALL' || u.location === selectedLocation;
       const matchesUnitStatus = selectedUnitStatus === 'ALL' || u.unitStatus === selectedUnitStatus;
-      const matchesJobStatus = selectedJobStatus === 'ALL' || u.jobStatus === selectedJobStatus;
+      
+      const matchesSecondary = activeTab === 'pm'
+        ? (selectedJobStatus === 'ALL' || u.jobStatus === selectedJobStatus)
+        : (selectedRemarks === 'ALL' || u.remarks === selectedRemarks);
 
-      return matchesSearch && matchesModel && matchesLocation && matchesUnitStatus && matchesJobStatus;
+      return matchesSearch && matchesModel && matchesLocation && matchesUnitStatus && matchesSecondary;
     });
-  }, [enrichedUnits, searchQuery, selectedModel, selectedLocation, selectedUnitStatus, selectedJobStatus]);
+  }, [enrichedUnits, searchQuery, selectedModel, selectedLocation, selectedUnitStatus, selectedJobStatus, selectedRemarks, activeTab]);
 
   // Aggregate Key Statistics
   const stats = useMemo(() => {
@@ -745,10 +839,8 @@ export default function UnitDashboard() {
     enrichedUnits.forEach(u => {
       const jobUpper = (u.jobStatus || '').trim().toUpperCase();
       const isRfu = jobUpper === 'RFU' || jobUpper === 'READY FOR USE' || jobUpper === 'COMPLETED';
-      let statusLower = (u.unitStatus || '').toLowerCase();
-      if (isRfu) {
-        statusLower = 'running without trouble';
-      }
+      
+      const displayStatus = formatUnitStatus(u.unitStatus);
 
       const smuVal = parseInt(u.smuToRun, 10);
       const isNeedService = !isNaN(smuVal) && smuVal <= 50;
@@ -756,15 +848,36 @@ export default function UnitDashboard() {
         needServiceCount++;
       }
 
-      if (statusLower.includes('breakdown')) {
+      if (displayStatus === 'BREAKDOWN') {
         breakdownCount++;
-      } else if (statusLower.includes('without')) {
+      } else if (displayStatus === 'RUNNING WITHOUT TROUBLE') {
         runningHealthyCount++;
-      } else if (statusLower.includes('trouble')) {
+      } else if (displayStatus === 'RUNNING WITH TROUBLE') {
         runningTroubleCount++;
       }
 
-      if (u.srNumber && u.srNumber !== '-') activeSRs++;
+      // Service Requests (SR) recording logic:
+      const srNum = (u.srNumber || '').trim();
+      const brSrNum = (u.breakdownSrNumber || '').trim();
+      const hasPmSr = srNum !== '' && srNum !== '-';
+      const hasBrSr = brSrNum !== '' && brSrNum !== '-';
+
+      const isStatusBreakdownOrRwt = displayStatus === 'BREAKDOWN' || displayStatus === 'RUNNING WITH TROUBLE';
+      const pVal = parseFloat(u.percent || '0');
+
+      if (isStatusBreakdownOrRwt) {
+        // For Breakdown/RWT: count both if they are distinct
+        if (hasPmSr && hasBrSr && srNum !== brSrNum) {
+          activeSRs += 2;
+        } else if (hasPmSr || hasBrSr) {
+          activeSRs += 1;
+        }
+      } else {
+        // For Running Healthy: count if not RFU OR if percent >= 90
+        if (hasPmSr && (!isRfu || pVal >= 90)) {
+          activeSRs += 1;
+        }
+      }
       if (u.woNumber && u.woNumber !== '-') totalWorkOrders++;
     });
 
@@ -779,16 +892,52 @@ export default function UnitDashboard() {
     };
   }, [enrichedUnits]);
 
+  // Aggregated Statistics specifically for columns R-AH (Breakdown Status)
+  const breakdownStats = useMemo(() => {
+    let breakdownCount = 0;
+    let waitingPartsCount = 0;
+    let inProgressCount = 0;
+    let delayLabourCount = 0;
+    let rfuCount = 0;
+    
+    enrichedUnits.forEach(u => {
+      const statusLower = (u.unitStatus || '').toLowerCase();
+      const remarksUpper = (u.remarks || '').toUpperCase();
+      
+      if (statusLower.includes('breakdown')) {
+        breakdownCount++;
+      }
+      if (remarksUpper === 'WAITING PART') {
+        waitingPartsCount++;
+      } else if (remarksUpper === 'INPROGRESS' || remarksUpper === 'IN PROGRESS') {
+        inProgressCount++;
+      } else if (remarksUpper === 'DELAY LABOUR') {
+        delayLabourCount++;
+      } else if (remarksUpper === 'RFU') {
+        rfuCount++;
+      }
+    });
+
+    return {
+      breakdown: breakdownCount,
+      waitingParts: waitingPartsCount,
+      inProgress: inProgressCount,
+      delayLabour: delayLabourCount,
+      rfu: rfuCount
+    };
+  }, [enrichedUnits]);
+
   // Pie Chart Data for Unit Status
   const unitStatusChartData = useMemo(() => {
     const counts: Record<string, number> = {};
     enrichedUnits.forEach(u => {
-      const jobUpper = (u.jobStatus || '').trim().toUpperCase();
-      const isRfu = jobUpper === 'RFU' || jobUpper === 'READY FOR USE' || jobUpper === 'COMPLETED';
-      let status = u.unitStatus || 'Unknown';
-      if (isRfu) {
-        status = 'Running without trouble';
-      }
+      const displayStatus = formatUnitStatus(u.unitStatus);
+      let status = 'Unknown';
+      if (displayStatus === 'BREAKDOWN') status = 'Breakdown';
+      else if (displayStatus === 'RUNNING WITHOUT TROUBLE') status = 'Running without trouble';
+      else if (displayStatus === 'RUNNING WITH TROUBLE') status = 'Running with trouble';
+      else status = displayStatus;
+      
       counts[status] = (counts[status] || 0) + 1;
     });
     return Object.entries(counts).map(([name, value]) => ({ name, value }));
@@ -903,7 +1052,14 @@ export default function UnitDashboard() {
 
   const handleOpenEdit = (unit: UnitData) => {
     setEditingUnit(unit);
-    setEditForm({ ...unit });
+    setEditForm({
+      ...unit,
+      breakdownSrNumber: unit.breakdownSrNumber || '',
+      breakdownSrDate: unit.breakdownSrDate || '',
+      breakdownSrAging: unit.breakdownSrAging || '',
+      breakdownWoNumber: unit.breakdownWoNumber || ''
+    });
+    setIsPmManuallyEdited(false);
     setEditSuccessMsg(null);
     setEditErrorMsg(null);
   };
@@ -1024,7 +1180,81 @@ export default function UnitDashboard() {
     }
   };
 
+  const handleDeleteUnit = async () => {
+    if (!unitToDelete) return;
+    
+    try {
+      setDeleteLoading(true);
+      setDeleteErrorMsg(null);
+
+      // We remove locally first
+      const deletedSn = unitToDelete.snUnit;
+      setUnits(prev => prev.filter(u => u.snUnit !== deletedSn));
+      
+      // Attempt backend proxy delete
+      let success = false;
+      let errorMsg = '';
+      const deletePayload = { snUnit: deletedSn, action: 'delete' };
+
+      try {
+        const res = await fetch('/api/units/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(deletePayload),
+        });
+        if (res.ok) {
+          const resData = await res.json().catch(() => ({}));
+          if (resData && resData.success !== false) {
+            success = true;
+          } else {
+            errorMsg = resData.error || 'Ditolak backend GAS';
+          }
+        }
+      } catch (err: any) {
+        errorMsg = err.message;
+      }
+
+      // Fallback
+      const activeUrl = gasUrl || localStorage.getItem('uniquip_gas_url') || '';
+      if (!success && activeUrl) {
+        try {
+          const response = await fetch(activeUrl, {
+            method: 'POST',
+            body: JSON.stringify(deletePayload)
+          });
+          if (response.ok) {
+            const resData = await response.json();
+            if (resData && resData.success !== false) {
+              success = true;
+            }
+          }
+        } catch (err) {}
+      }
+      
+      if (!success) {
+        console.warn("Delete request failed on remote. Retrying later or already removed locally.");
+      }
+
+      // Clear unsynced and override reference if deleted
+      const cleanUnsynced = unsyncedSns.filter(sn => sn !== deletedSn);
+      setUnsyncedSns(cleanUnsynced);
+      localStorage.setItem('uniquip_unsynced_sns', JSON.stringify(cleanUnsynced));
+
+      const cleanOverrides = { ...localOverrides };
+      delete cleanOverrides[deletedSn];
+      setLocalOverrides(cleanOverrides);
+      localStorage.setItem('uniquip_local_overrides', JSON.stringify(cleanOverrides));
+
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setDeleteLoading(false);
+      setUnitToDelete(null);
+    }
+  };
+
   const handleOpenAdd = () => {
+    setIsAddPmManuallyEdited(false);
     setAddForm({
       snUnit: '',
       model: '',
@@ -1043,8 +1273,19 @@ export default function UnitDashboard() {
       srDate: '',
       srAging: '',
       woNumber: '',
+      jobStatus: 'RFU',
       idTicked: '',
-      jobStatus: 'RFU'
+      labour1: '',
+      labour2: '',
+      labour3: '',
+      labour4: '',
+      remarks: '',
+      hmRfu: '',
+      leadJobDescription: '',
+      breakdownSrNumber: '',
+      breakdownSrDate: '',
+      breakdownSrAging: '',
+      breakdownWoNumber: ''
     });
     setAddSuccessMsg(null);
     setAddErrorMsg(null);
@@ -1364,10 +1605,11 @@ function doPost(e) {
     }
     
     // Normalize header names to associate with payload fields
-    function getNormalizedKey(key) {
+    function getNormalizedKey(key, colIndex) {
       var norm = key.toLowerCase().replace(/[^a-z0-9%\\s]/g, '').replace(/\\s+/g, ' ').trim();
       if (norm.indexOf('sn unit') !== -1 || norm.indexOf('snunit') !== -1) return 'snUnit';
       if (norm === 'model') return 'model';
+      if (norm.indexOf('plan schedule pm') !== -1 || norm.indexOf('planning schedule') !== -1 || norm.indexOf('pm schedule') !== -1) return 'planSchedulePm';
       if (norm.indexOf('issue description') !== -1 || norm.indexOf('issue') !== -1) return 'issueDescription';
       if (norm === 'location') return 'location';
       if (norm.indexOf('unit status') !== -1 || norm.indexOf('unitstatus') !== -1) return 'unitStatus';
@@ -1378,19 +1620,32 @@ function doPost(e) {
       if (norm.indexOf('last date service') !== -1 || norm.indexOf('lastdate') !== -1) return 'lastDateService';
       if (norm.indexOf('last service smu') !== -1 || norm.indexOf('lastservice') !== -1) return 'lastServiceSmu';
       if (norm.indexOf('averang') !== -1 || norm.indexOf('average') !== -1) return 'averageUnitRun';
-      if (norm.indexOf('sr number') !== -1 || norm.indexOf('srnumber') !== -1) return 'srNumber';
-      if (norm.indexOf('sr date') !== -1 || norm.indexOf('srdate') !== -1) return 'srDate';
-      if (norm.indexOf('sr aging') !== -1 || norm.indexOf('sraging') !== -1) return 'srAging';
-      if (norm.indexOf('wo number') !== -1 || norm.indexOf('wonumber') !== -1) return 'woNumber';
-      if (norm.indexOf('id ticked') !== -1 || norm.indexOf('idticked') !== -1 || norm.indexOf('id ticket') !== -1 || norm.indexOf('idticket') !== -1) return 'idTicked';
+      if (norm.indexOf('breakdown sr number') !== -1 || norm.indexOf('breakdownsrnumber') !== -1 || norm.indexOf('sr breakdown') !== -1 || norm.indexOf('srnumberbreakdown') !== -1) return 'breakdownSrNumber';
+      if (norm.indexOf('breakdown sr date') !== -1 || norm.indexOf('breakdownsrdate') !== -1 || norm.indexOf('sr date breakdown') !== -1) return 'breakdownSrDate';
+      if (norm.indexOf('breakdown sr aging') !== -1 || norm.indexOf('breakdownsraging') !== -1 || norm.indexOf('sr aging breakdown') !== -1) return 'breakdownSrAging';
+      if (norm.indexOf('breakdown wo number') !== -1 || norm.indexOf('breakdownwonumber') !== -1 || norm.indexOf('wo breakdown') !== -1 || norm.indexOf('wonumberbreakdown') !== -1) return 'breakdownWoNumber';
+      
+      if (norm.indexOf('sr number') !== -1 || norm.indexOf('srnumber') !== -1) return (typeof colIndex !== 'undefined' && colIndex >= 17) ? 'breakdownSrNumber' : 'srNumber';
+      if (norm.indexOf('sr date') !== -1 || norm.indexOf('srdate') !== -1) return (typeof colIndex !== 'undefined' && colIndex >= 17) ? 'breakdownSrDate' : 'srDate';
+      if (norm.indexOf('sr aging') !== -1 || norm.indexOf('sraging') !== -1) return (typeof colIndex !== 'undefined' && colIndex >= 17) ? 'breakdownSrAging' : 'srAging';
+      if (norm.indexOf('wo number') !== -1 || norm.indexOf('wonumber') !== -1) return (typeof colIndex !== 'undefined' && colIndex >= 17) ? 'breakdownWoNumber' : 'woNumber';
+      
       if (norm.indexOf('job status') !== -1 || norm.indexOf('jobstatus') !== -1) return 'jobStatus';
+      if (norm.indexOf('id ticket') !== -1 || norm.indexOf('idticket') !== -1 || norm.indexOf('id ticked') !== -1 || norm.indexOf('idticked') !== -1) return 'idTicked';
+      if (norm.indexOf('labour 1') !== -1 || norm.indexOf('labour1') !== -1) return 'labour1';
+      if (norm.indexOf('labour 2') !== -1 || norm.indexOf('labour2') !== -1) return 'labour2';
+      if (norm.indexOf('labour 3') !== -1 || norm.indexOf('labour3') !== -1) return 'labour3';
+      if (norm.indexOf('labour 4') !== -1 || norm.indexOf('labour4') !== -1) return 'labour4';
+      if (norm.indexOf('remarks') !== -1) return 'remarks';
+      if (norm.indexOf('hm rfu') !== -1 || norm.indexOf('hmrfu') !== -1) return 'hmRfu';
+      if (norm.indexOf('lead job') !== -1 || norm.indexOf('leadjob') !== -1) return 'leadJobDescription';
       return '';
     }
     
     // Key and indexing maps
     var keyToColIdx = {};
     for (var col = 0; col < headers.length; col++) {
-      var normKey = getNormalizedKey(headers[col]);
+      var normKey = getNormalizedKey(headers[col], col);
       if (normKey) {
         keyToColIdx[normKey] = col;
       }
@@ -1441,6 +1696,26 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
     
+    // ACTION: DELETE UNIT
+    if (payload.action === 'delete') {
+      var snToDelete = String(payload.snUnit).trim();
+      var rowToDelete = -1;
+      for (var r = headerRowIndex + 1; r < data.length; r++) {
+        if (String(data[r][snColIdx]).trim() === snToDelete) {
+          rowToDelete = r;
+          break;
+        }
+      }
+      if (rowToDelete !== -1) {
+        activeSheet.deleteRow(rowToDelete + 1);
+        return ContentService.createTextOutput(JSON.stringify({ success: true, message: "Unit berhasil dihapus." }))
+          .setMimeType(ContentService.MimeType.JSON);
+      } else {
+        return ContentService.createTextOutput(JSON.stringify({ success: false, error: "Unit tidak ditemukan untuk dihapus." }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+
     // ACTION: SINGLE RECORD INSERT/UPDATE
     var snToMatch = String(payload.snUnit).trim();
     if (!snToMatch) {
@@ -1508,7 +1783,7 @@ function doPost(e) {
   }
 
   return (
-    <div className="px-2 py-6 md:px-4 w-full max-w-[100%] space-y-6 animate-fade-in">
+    <div className="w-full max-w-full px-4 md:px-6 lg:px-8 py-6 space-y-6 animate-fade-in">
       
       {/* Dynamic Header */}
       <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-800">
@@ -1647,7 +1922,35 @@ function doPost(e) {
         </div>
       )}
 
-      {/* KPI Stats Widgets Area */}
+      {/* Tabs Switcher Navigation */}
+      <div className="flex border-b border-slate-800 gap-1 overflow-x-auto scrollbar-none">
+        <button
+          onClick={() => setActiveTab('pm')}
+          className={`px-5 py-3 text-xs font-bold font-mono uppercase tracking-widest border-b-2 transition-all cursor-pointer flex items-center gap-2 shrink-0 ${
+            activeTab === 'pm'
+              ? 'border-sky-500 text-sky-400 bg-sky-500/5'
+              : 'border-transparent text-slate-400 hover:text-white hover:bg-slate-900/40'
+          }`}
+        >
+          <SlidersHorizontal className="w-4 h-4" />
+          PM PROJECT SCHEDULE & TRACKING
+        </button>
+        <button
+          onClick={() => setActiveTab('breakdown')}
+          className={`px-5 py-3 text-xs font-bold font-mono uppercase tracking-widest border-b-2 transition-all cursor-pointer flex items-center gap-2 shrink-0 ${
+            activeTab === 'breakdown'
+              ? 'border-indigo-505 border-indigo-500 text-indigo-400 bg-indigo-500/5'
+              : 'border-transparent text-slate-400 hover:text-white hover:bg-slate-900/40'
+          }`}
+        >
+          <Activity className="w-4 h-4" />
+          MONITORING AND REPORTING BREAKDOWN STATUS
+        </button>
+      </div>
+
+      {activeTab === 'pm' && (
+        <>
+          {/* KPI Stats Widgets Area */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         
         {/* Metric 1 */}
@@ -1957,7 +2260,7 @@ function doPost(e) {
         </div>
 
         {/* Clear filters label */}
-        {(selectedModel !== 'ALL' || selectedLocation !== 'ALL' || selectedUnitStatus !== 'ALL' || selectedJobStatus !== 'ALL' || searchQuery !== '') && (
+        {(selectedModel !== 'ALL' || selectedLocation !== 'ALL' || selectedUnitStatus !== 'ALL' || selectedJobStatus !== 'ALL' || selectedRemarks !== 'ALL' || searchQuery !== '') && (
           <div className="flex items-center justify-between pt-1 border-t border-slate-800/40">
             <p className="text-xs text-slate-400">
               Menampilkan <span className="text-sky-400 font-bold">{filteredUnits.length}</span> dari <span className="font-bold">{enrichedUnits.length}</span> fleet unit yang sesuai filter.
@@ -1969,6 +2272,7 @@ function doPost(e) {
                 setSelectedLocation('ALL');
                 setSelectedUnitStatus('ALL');
                 setSelectedJobStatus('ALL');
+                setSelectedRemarks('ALL');
                 setSearchQuery('');
               }}
               className="text-xs text-rose-400 hover:text-rose-350 hover:underline transition-all cursor-pointer"
@@ -2011,34 +2315,33 @@ function doPost(e) {
         </div>
         
         <div className="overflow-x-auto scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent">
-          <table className="w-full text-left border-collapse min-w-[1600px] text-[10px] xl:text-[11px]">
+          <table className="w-full text-left border-collapse min-w-[1525px] text-[10px] xl:text-[11px] table-fixed">
             <thead>
               <tr className="border-b border-slate-800 bg-slate-950/60 text-slate-400 text-[10px] uppercase tracking-wider font-mono">
-                <th className="p-1.5 py-2.5 pl-4 sticky left-0 bg-slate-950/90 shadow-[4px_0_10px_rgba(0,0,0,0.4)] z-10">SN UNIT</th>
-                <th className="p-1.5 py-2.5 text-center">MODEL</th>
-                <th className="p-1.5 py-2.5 min-w-[130px]">PLANNING SCHEDULE PM</th>
-                <th className="p-1.5 py-2.5">LOCATION</th>
-                <th className="p-1.5 py-2.5 text-center">UNIT STATUS</th>
-                <th className="p-1.5 py-2.5 text-center">SMU TO RUN</th>
-                <th className="p-1.5 py-2.5 text-center">%</th>
-                <th className="p-1.5 py-2.5 text-center">PLANNED SMU</th>
-                <th className="p-1.5 py-2.5">PLANNED DATE</th>
-                <th className="p-1.5 py-2.5">LAST DATE SERVICE</th>
-                <th className="p-1.5 py-2.5 text-center">LAST SERVICE SMU</th>
-                <th className="p-1.5 py-2.5 text-center">AVERANGE UNIT RUN</th>
-                <th className="p-1.5 py-2.5">SR NUMBER</th>
-                <th className="p-1.5 py-2.5 bg-slate-950/20">SR DATE</th>
-                <th className="p-1.5 py-2.5 text-center">SR AGING</th>
-                <th className="p-1.5 py-2.5">WO NUMBER</th>
-                <th className="p-1.5 py-2.5">ID TICKED</th>
-                <th className="p-1.5 py-2.5 text-center">JOB STATUS</th>
-                <th className="p-1.5 py-2.5 pr-4 text-center">EDIT</th>
+                <th className="p-1.5 py-2.5 pl-4 sticky left-0 bg-slate-950/90 shadow-[4px_0_10px_rgba(0,0,0,0.4)] z-10 w-[160px] min-w-[160px] max-w-[160px]">SN UNIT</th>
+                <th className="p-1.5 py-2.5 text-center w-[70px] min-w-[70px] max-w-[70px]">MODEL</th>
+                <th className="p-1.5 py-2.5 w-[125px] min-w-[125px] max-w-[125px]">PLANNING SCHEDULE PM</th>
+                <th className="p-1.5 py-2.5 w-[100px] min-w-[100px] max-w-[100px]">LOCATION</th>
+                <th className="p-1.5 py-2.5 text-center w-[115px] min-w-[115px] max-w-[115px]">UNIT STATUS</th>
+                <th className="p-1.5 py-2.5 text-center w-[80px] min-w-[80px] max-w-[80px]">SMU TO RUN</th>
+                <th className="p-1.5 py-2.5 text-center w-[45px] min-w-[45px] max-w-[45px]">%</th>
+                <th className="p-1.5 py-2.5 text-center w-[85px] min-w-[85px] max-w-[85px]">PLANNED SMU</th>
+                <th className="p-1.5 py-2.5 w-[85px] min-w-[85px] max-w-[85px] text-center">PLANNED DATE</th>
+                <th className="p-1.5 py-2.5 w-[85px] min-w-[85px] max-w-[85px] text-center">LAST DATE SERVICE</th>
+                <th className="p-1.5 py-2.5 text-center w-[85px] min-w-[85px] max-w-[85px]">LAST SERVICE SMU</th>
+                <th className="p-1.5 py-2.5 text-center w-[85px] min-w-[85px] max-w-[85px]">AVERANGE UNIT RUN</th>
+                <th className="p-1.5 py-2.5 w-[100px] min-w-[100px] max-w-[100px]">SR NUMBER</th>
+                <th className="p-1.5 py-2.5 w-[85px] min-w-[85px] max-w-[85px] text-center bg-slate-950/20">SR DATE</th>
+                <th className="p-1.5 py-2.5 text-center w-[65px] min-w-[65px] max-w-[65px]">SR AGING</th>
+                <th className="p-1.5 py-2.5 w-[100px] min-w-[100px] max-w-[100px]">WO NUMBER</th>
+                <th className="p-1.5 py-2.5 text-center w-[85px] min-w-[85px] max-w-[85px]">JOB STATUS</th>
+                <th className="p-1.5 py-2.5 text-center w-[75px] min-w-[75px] max-w-[75px] sticky right-0 bg-slate-950/90 shadow-[-4px_0_10px_rgba(0,0,0,0.4)] z-10">ACTION</th>
               </tr>
             </thead>
             <tbody>
               {filteredUnits.length === 0 ? (
                 <tr>
-                  <td colSpan={19} className="p-12 text-center text-slate-500 font-mono">
+                  <td colSpan={18} className="p-12 text-center text-slate-500 font-mono">
                     No active machinery records found matching the active filtering criteria.
                   </td>
                 </tr>
@@ -2051,22 +2354,22 @@ function doPost(e) {
                   >
                     
                     {/* SN UNIT */}
-                    <td className="p-1.5 py-2 pl-4 font-mono font-bold text-sky-450 text-sky-400 sticky left-0 bg-slate-900/90 shadow-[4px_0_10px_rgba(0,0,0,0.3)] hover:text-sky-300 truncate">
+                    <td className="p-1.5 py-2 pl-4 font-mono font-bold text-sky-450 text-sky-400 sticky left-0 bg-slate-900/90 shadow-[4px_0_10px_rgba(0,0,0,0.3)] hover:text-sky-300 w-[160px] min-w-[160px] max-w-[160px] break-all">
                       {u.snUnit || '-'}
                     </td>
                     
                     {/* MODEL */}
-                    <td className="p-1.5 py-2 font-semibold text-white text-center truncate">
+                    <td className="p-1.5 py-2 font-semibold text-white text-center w-[70px] min-w-[70px] max-w-[70px] truncate">
                       {u.model || '-'}
                     </td>
                     
                     {/* PLANNING SCHEDULE PM */}
-                    <td className="p-1.5 py-2 max-w-[160px] truncate font-bold text-orange-500" title={u.planSchedulePm}>
+                    <td className="p-1.5 py-2 font-bold text-orange-500 w-[125px] min-w-[125px] max-w-[125px] truncate" title={u.planSchedulePm}>
                       {u.planSchedulePm || '-'}
                     </td>
                     
                     {/* LOCATION */}
-                    <td className="p-1.5 py-2 truncate">
+                    <td className="p-1.5 py-2 w-[100px] min-w-[100px] max-w-[100px] truncate">
                       <span className="flex items-center gap-1 text-slate-300">
                         <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
                         <span className="truncate">{u.location || '-'}</span>
@@ -2074,14 +2377,14 @@ function doPost(e) {
                     </td>
                     
                     {/* UNIT STATUS */}
-                    <td className="p-1.5 py-2 text-center">
+                    <td className="p-1.5 py-2 text-center w-[115px] min-w-[115px] max-w-[115px] truncate">
                       <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold inline-block leading-none tracking-tight ${getUnitStatusStyle(u.unitStatus)}`}>
                         {formatUnitStatus(u.unitStatus)}
                       </span>
                     </td>
                     
                     {/* SMU TO RUN */}
-                    <td className="p-1.5 py-2 text-center font-mono truncate">
+                    <td className="p-1.5 py-2 text-center font-mono w-[80px] min-w-[80px] max-w-[80px] truncate">
                       {u.smuToRun && u.smuToRun !== '-' && u.smuToRun !== 'NO DATA' ? (
                         <div className="flex items-center justify-center gap-1">
                           {parseInt(u.smuToRun, 10) <= -25 && (
@@ -2095,11 +2398,11 @@ function doPost(e) {
                     </td>
 
                     {/* % */}
-                    <td className="p-1.5 py-2 text-center truncate">
+                    <td className="p-1.5 py-2 text-center w-[45px] min-w-[45px] max-w-[45px] truncate">
                       {u.percent === '!' || !u.percent || u.percent === '-' || u.percent === 'NO DATA' ? (
                         <div className="inline-flex">
-                          <span className="px-2.5 py-0.5 rounded bg-rose-500/20 text-rose-500 border border-rose-500/30 text-[9px] font-extrabold font-mono tracking-wider animate-pulse inline-flex items-center gap-1 justify-center">
-                            ⚠️ !
+                          <span className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-500 border border-rose-500/30 text-[9px] font-extrabold font-mono tracking-wider animate-pulse inline-flex items-center gap-1 justify-center">
+                            ⚠️!
                           </span>
                         </div>
                       ) : (
@@ -2111,9 +2414,9 @@ function doPost(e) {
                     </td>
 
                     {/* PLANNED SMU */}
-                    <td className="p-1.5 py-2 text-center font-mono truncate">
+                    <td className="p-1.5 py-2 text-center font-mono w-[85px] min-w-[85px] max-w-[85px] truncate">
                       {u.plannedSmu === 'NO DATA' ? (
-                        <span className="px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[9px] font-bold font-mono tracking-wider">
+                        <span className="px-1 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[9px] font-bold font-mono tracking-wider">
                           NO DATA
                         </span>
                       ) : (
@@ -2122,9 +2425,9 @@ function doPost(e) {
                     </td>
 
                     {/* PLANNED DATE */}
-                    <td className="p-1.5 py-2 font-mono truncate text-center" title={u.plannedDate}>
+                    <td className="p-1.5 py-2 font-mono text-center w-[85px] min-w-[85px] max-w-[85px] truncate" title={u.plannedDate}>
                       {u.plannedDate === 'NO DATA' ? (
-                        <span className="px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[9px] font-bold font-mono tracking-wider">
+                        <span className="px-1 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[9px] font-bold font-mono tracking-wider">
                           NO DATA
                         </span>
                       ) : (
@@ -2133,61 +2436,67 @@ function doPost(e) {
                     </td>
 
                     {/* LAST DATE SERVICE */}
-                    <td className="p-1.5 py-2 text-slate-450 font-mono truncate text-slate-400" title={u.lastDateService}>
+                    <td className="p-1.5 py-2 text-slate-400 font-mono text-center w-[85px] min-w-[85px] max-w-[85px] truncate" title={u.lastDateService}>
                       {formatCompactDate(u.lastDateService)}
                     </td>
 
                     {/* LAST SERVICE SMU */}
-                    <td className="p-1.5 py-2 text-center font-mono text-slate-300 truncate">
+                    <td className="p-1.5 py-2 text-center font-mono text-slate-300 w-[85px] min-w-[85px] max-w-[85px] truncate">
                       {u.lastServiceSmu || '-'}
                     </td>
 
                     {/* AVERAGE UNIT RUN */}
-                    <td className="p-1.5 py-2 text-center font-mono text-emerald-400 font-bold truncate">
+                    <td className="p-1.5 py-2 text-center font-mono text-emerald-400 font-bold w-[85px] min-w-[85px] max-w-[85px] truncate">
                       {u.averageUnitRun || '-'}
                     </td>
 
                     {/* SR NUMBER */}
-                    <td className="p-1.5 py-2 font-mono text-slate-400 truncate" title={u.srNumber}>
+                    <td className="p-1.5 py-2 font-mono text-slate-400 w-[100px] min-w-[100px] max-w-[100px] truncate" title={u.srNumber}>
                       {u.srNumber || '-'}
                     </td>
 
                     {/* SR DATE */}
-                    <td className="p-1.5 py-2 text-slate-400 font-mono truncate" title={u.srDate}>
+                    <td className="p-1.5 py-2 text-slate-400 font-mono text-center w-[85px] min-w-[85px] max-w-[85px] truncate" title={u.srDate}>
                       {formatCompactDate(u.srDate)}
                     </td>
 
                     {/* SR AGING */}
-                    <td className="p-1.5 py-2 text-center font-mono text-slate-300 truncate">
+                    <td className="p-1.5 py-2 text-center font-mono text-slate-300 w-[65px] min-w-[65px] max-w-[65px] truncate">
                       {u.srAging || '-'}
                     </td>
 
                     {/* WO NUMBER */}
-                    <td className="p-1.5 py-2 font-mono text-slate-400 truncate" title={u.woNumber}>
+                    <td className="p-1.5 py-2 font-mono text-slate-400 w-[100px] min-w-[100px] max-w-[100px] truncate" title={u.woNumber}>
                       {u.woNumber || '-'}
                     </td>
 
-                    {/* ID TICKET */}
-                    <td className="p-1.5 py-2 font-mono text-slate-300 truncate" title={u.idTicked}>
-                      {u.idTicked || '-'}
-                    </td>
-
                     {/* JOB STATUS */}
-                    <td className="p-1.5 py-2 text-center truncate">
+                    <td className="p-1.5 py-2 text-center w-[85px] min-w-[85px] max-w-[85px] truncate">
                       <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold inline-block leading-none tracking-tight ${getJobStatusStyle(u.jobStatus)}`}>
                         {u.jobStatus || '-'}
                       </span>
                     </td>
 
-                    {/* EDIT ACTION */}
-                    <td className="p-1.5 py-1 pr-4 text-center" onClick={(e) => { e.stopPropagation(); handleOpenEdit(u); }}>
-                      <button
-                        type="button"
-                        className="w-7 h-7 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 border border-indigo-500/20 hover:border-indigo-500/40 rounded flex items-center justify-center mx-auto transition-all cursor-pointer shadow-sm"
-                        title="Edit Data Unit"
-                      >
-                        <Pencil className="w-3.5 h-3.5" />
-                      </button>
+                    {/* ACTION */}
+                    <td className="p-1.5 py-1 text-center w-[75px] min-w-[75px] max-w-[75px] sticky right-0 bg-slate-900 shadow-[-4px_0_10px_rgba(0,0,0,0.4)] z-10 group-hover:bg-slate-800 transition-colors duration-150">
+                      <div className="flex gap-1.5 justify-center">
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); handleOpenEdit(u); }}
+                          className="w-7 h-7 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 border border-indigo-500/20 hover:border-indigo-500/40 rounded flex flex-shrink-0 items-center justify-center transition-all cursor-pointer shadow-sm"
+                          title="Edit Data Unit"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setUnitToDelete(u); }}
+                          className="w-7 h-7 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 border border-rose-500/20 hover:border-rose-500/40 rounded flex flex-shrink-0 items-center justify-center transition-all cursor-pointer shadow-sm"
+                          title="Hapus Unit"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </td>
 
                   </tr>
@@ -2197,6 +2506,381 @@ function doPost(e) {
           </table>
         </div>
       </div>
+    </>
+  )}
+
+  {activeTab === 'breakdown' && (
+    <>
+      {/* MONITORING AND REPORTING BREAKDOWN STATUS Dashboard Header Banner */}
+      <div className="bg-slate-900 border border-slate-800/80 p-6 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h3 className="text-xl font-black text-slate-100 flex items-center gap-2">
+            <Activity className="w-6 h-6 text-indigo-400" />
+            MONITORING AND REPORTING BREAKDOWN STATUS
+          </h3>
+          <p className="text-xs text-indigo-400 font-bold uppercase tracking-widest mt-1">
+            PT. PRATAMA ABADI SENTOSA • ACTIVE RECORD SHEET FOR COLUMNS R - AH
+          </p>
+        </div>
+        <div className="flex items-center gap-2 text-xs font-mono text-slate-400">
+          <span>Active View: columns R-AH synchronization</span>
+        </div>
+      </div>
+
+      {/* Breakdown Specific KPI Cards Area */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        {/* Card 1: Total Fleet */}
+        <div className="bg-slate-900 border border-slate-800/80 p-4 rounded-xl flex flex-col justify-between hover:border-slate-755/50 transition-all">
+          <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider">Total Fleet Units</span>
+          <div className="flex items-baseline gap-2 mt-2">
+            <span className="text-3xl font-extrabold text-white">{stats.total}</span>
+            <span className="text-xs text-slate-500 font-mono">Beds</span>
+          </div>
+        </div>
+
+        {/* Card 2: Critical Breakdown */}
+        <div className="bg-slate-900/40 border border-red-500/20 p-4 rounded-xl flex flex-col justify-between hover:border-red-500/45 transition-all shadow-lg shadow-red-950/10">
+          <span className="text-xs text-red-500 font-semibold uppercase tracking-wider flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-ping"></span>
+            Breakdown Status
+          </span>
+          <div className="flex items-baseline gap-2 mt-2">
+            <span className="text-3xl font-extrabold text-red-500">{breakdownStats.breakdown}</span>
+            <span className="text-xs text-slate-550 font-mono">Units</span>
+          </div>
+        </div>
+
+        {/* Card 3: Waiting Parts */}
+        <div className="bg-slate-900 border border-slate-800/85 p-4 rounded-xl flex flex-col justify-between hover:border-slate-700/50 transition-all">
+          <span className="text-xs text-amber-400 font-semibold uppercase tracking-wider">Waiting Part</span>
+          <div className="flex items-baseline gap-2 mt-2">
+            <span className="text-3xl font-extrabold text-amber-400">{breakdownStats.waitingParts}</span>
+            <span className="text-xs text-slate-505 font-mono">Pending</span>
+          </div>
+        </div>
+
+        {/* Card 4: In Progress Service */}
+        <div className="bg-slate-900 border border-slate-800/85 p-4 rounded-xl flex flex-col justify-between hover:border-slate-700/50 transition-all">
+          <span className="text-xs text-sky-450 font-semibold uppercase tracking-wider">In-Progress Services</span>
+          <div className="flex items-baseline gap-2 mt-2">
+            <span className="text-3xl font-extrabold text-sky-400">{breakdownStats.inProgress}</span>
+            <span className="text-xs text-slate-505 font-mono">Active</span>
+          </div>
+        </div>
+
+        {/* Card 5: Ready For Use RFU */}
+        <div className="bg-slate-900 border border-emerald-500/20 p-4 rounded-xl flex flex-col justify-between hover:border-emerald-500/40 transition-all shadow-lg shadow-emerald-900/5">
+          <span className="text-xs text-emerald-400 font-semibold uppercase tracking-wider">Ready For Use (RFU)</span>
+          <div className="flex items-baseline gap-2 mt-2">
+            <span className="text-3xl font-extrabold text-emerald-400">{breakdownStats.rfu}</span>
+            <span className="text-xs text-slate-505 font-mono">Operational</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Advanced Control Filter Bar (Reuse inputs cleanly) */}
+      <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 space-y-4">
+        <div className="flex flex-col md:flex-row items-center gap-3">
+          
+          {/* Searching */}
+          <div className="relative w-full md:flex-1">
+            <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Search by SN Unit, Model, Location, Work Order or Lead description..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-4 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-505 transition-all font-sans"
+            />
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-slate-400 font-semibold select-none">
+            <SlidersHorizontal className="h-4 w-4 text-slate-400" />
+            <span>FITUR CONSTR:</span>
+          </div>
+
+        </div>
+
+        {/* Dropdown Filters Grid */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-1">
+          
+          {/* Model Filter */}
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Fleet Model</label>
+            <select
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-505 transition-all"
+            >
+              <option value="ALL">All Models (ALL)</option>
+              {filterOptions.models.map(m => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Location Filter */}
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Minesite Location</label>
+            <select
+              value={selectedLocation}
+              onChange={(e) => setSelectedLocation(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition-all"
+            >
+              <option value="ALL">All Sites (ALL)</option>
+              {filterOptions.locations.map(l => (
+                <option key={l} value={l}>{l}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Unit Status Filter */}
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Unit Status</label>
+            <select
+              value={selectedUnitStatus}
+              onChange={(e) => setSelectedUnitStatus(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition-all"
+            >
+              <option value="ALL">All Statuses (ALL)</option>
+              {filterOptions.unitStatuses.map(s => (
+                <option key={s} value={s}>{formatUnitStatus(s)}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Job Status / Remarks Filter */}
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">REMARKS (KOLOM AF)</label>
+            <select
+              value={selectedRemarks}
+              onChange={(e) => setSelectedRemarks(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition-all"
+            >
+              <option value="ALL">All Remarks (ALL)</option>
+              {filterOptions.remarks.map(r => (
+                <option key={r} value={r}>{r}</option>
+              ))}
+            </select>
+          </div>
+
+        </div>
+
+        {/* Clear filters label */}
+        {(selectedModel !== 'ALL' || selectedLocation !== 'ALL' || selectedUnitStatus !== 'ALL' || selectedJobStatus !== 'ALL' || selectedRemarks !== 'ALL' || searchQuery !== '') && (
+          <div className="flex items-center justify-between pt-1 border-t border-slate-850">
+            <p className="text-xs text-slate-450">
+              Menampilkan <span className="text-indigo-400 font-bold">{filteredUnits.length}</span> dari <span className="font-bold">{enrichedUnits.length}</span> fleet unit yang sesuai filter.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedModel('ALL');
+                setSelectedLocation('ALL');
+                setSelectedUnitStatus('ALL');
+                setSelectedJobStatus('ALL');
+                setSelectedRemarks('ALL');
+                setSearchQuery('');
+              }}
+              className="text-xs text-rose-450 hover:text-rose-400 hover:underline transition-all cursor-pointer"
+            >
+              Clear All Filtering Rules
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Breakdown Dashboard Master Table */}
+      <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl">
+        <div className="px-6 py-4 bg-slate-900 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+              <Activity className="w-5 h-5 text-indigo-400" />
+              Monitoring and Reporting Breakdown Registry
+            </h2>
+            <p className="text-xs text-slate-450 mt-1">
+              Click any row to display comprehensive machinery dossier details. Edit changes are pushed directly to sheet columns R-AH.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleOpenAdd}
+              className="bg-indigo-500 hover:bg-indigo-600 font-bold text-slate-955 text-white text-xs px-4 py-2 rounded-lg flex items-center gap-1.5 transition-all shadow-lg shadow-indigo-500/10 cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Tambah Unit Baru
+            </button>
+            <span className="text-xs font-mono font-bold bg-slate-950 border border-slate-800 px-3 py-2 rounded text-slate-350">
+              Total Rows: {filteredUnits.length}
+            </span>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent">
+          <table className="w-full text-left border-collapse min-w-[1600px] text-[10px] xl:text-[11px] table-fixed">
+            <thead>
+              <tr className="border-b border-slate-800 bg-slate-950/60 text-slate-400 text-[10px] uppercase tracking-wider font-mono">
+                <th className="p-1.5 py-2.5 pl-4 sticky left-0 bg-slate-950/90 shadow-[4px_0_10px_rgba(0,0,0,0.4)] z-10 w-[160px] min-w-[160px] max-w-[160px]">SN UNIT</th>
+                <th className="p-1.5 py-2.5 text-center w-[70px] min-w-[70px] max-w-[70px]">MODEL</th>
+                <th className="p-1.5 py-2.5 w-[140px] min-w-[140px] max-w-[140px]">ISSUE DESCRIPTION</th>
+                <th className="p-1.5 py-2.5 w-[100px] min-w-[100px] max-w-[100px]">LOCATION</th>
+                <th className="p-1.5 py-2.5 text-center w-[115px] min-w-[115px] max-w-[115px]">UNIT STATUS</th>
+                <th className="p-1.5 py-2.5 w-[100px] min-w-[100px] max-w-[100px]">SR NUMBER</th>
+                <th className="p-1.5 py-2.5 w-[85px] min-w-[85px] max-w-[85px] text-center">SR DATE</th>
+                <th className="p-1.5 py-2.5 text-center w-[65px] min-w-[65px] max-w-[65px]">SR AGING</th>
+                <th className="p-1.5 py-2.5 w-[100px] min-w-[100px] max-w-[100px]">WO NUMBER</th>
+                <th className="p-1.5 py-2.5 w-[70px] min-w-[70px] max-w-[70px] text-center">ID TICKET</th>
+                <th className="p-1.5 py-2.5 w-[80px] min-w-[80px] max-w-[80px]">LABOUR 1</th>
+                <th className="p-1.5 py-2.5 w-[80px] min-w-[80px] max-w-[80px]">LABOUR 2</th>
+                <th className="p-1.5 py-2.5 w-[80px] min-w-[80px] max-w-[80px]">LABOUR 3</th>
+                <th className="p-1.5 py-2.5 w-[80px] min-w-[80px] max-w-[80px]">LABOUR 4</th>
+                <th className="p-1.5 py-2.5 text-center w-[85px] min-w-[85px] max-w-[85px]">REMARKS (KOLOM AF)</th>
+                <th className="p-1.5 py-2.5 text-center w-[70px] min-w-[70px] max-w-[70px]">HM RFU</th>
+                <th className="p-1.5 py-2.5 w-[150px] min-w-[150px] max-w-[150px]">LEAD JOB DESCRIPTION</th>
+                <th className="p-1.5 py-2.5 text-center bg-slate-950/90 z-10 w-[75px] min-w-[75px] max-w-[75px] sticky right-0 shadow-[-4px_0_10px_rgba(0,0,0,0.4)]">ACTION</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredUnits.length === 0 ? (
+                <tr>
+                  <td colSpan={18} className="p-8 text-center text-slate-500 font-mono text-xs">
+                    No active breakdown records match the current filter rules.
+                  </td>
+                </tr>
+              ) : (
+                filteredUnits.map((u, idx) => {
+                  const remarksUpper = (u.remarks || '').toUpperCase();
+                  let remarksStyle = 'bg-slate-800/40 text-slate-400 border border-slate-800/60';
+                  if (remarksUpper === 'RFU') {
+                    remarksStyle = 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+                  } else if (remarksUpper === 'WAITING PART') {
+                    remarksStyle = 'bg-rose-500/10 text-rose-400 border border-rose-500/20 animate-pulse';
+                  } else if (remarksUpper === 'DELAY LABOUR') {
+                    remarksStyle = 'bg-amber-500/10 text-amber-505 text-amber-500 border border-amber-500/25';
+                  } else if (remarksUpper === 'INPROGRESS' || remarksUpper === 'IN PROGRESS') {
+                    remarksStyle = 'bg-sky-500/10 text-sky-400 border border-sky-550/20';
+                  }
+
+                  return (
+                    <tr
+                      key={`${u.snUnit}-breakdown-${idx}`}
+                      onClick={() => setSelectedUnit(u)}
+                      className="border-b border-slate-855 hover:bg-slate-850/20 transition-all cursor-pointer group"
+                    >
+                      {/* SN UNIT */}
+                      <td className="p-1.5 py-2 pl-4 sticky left-0 bg-slate-900/95 group-hover:bg-slate-800/95 transition-all shadow-[4px_0_10px_rgba(0,0,0,0.4)] z-0 font-bold font-mono text-sky-400 text-xs w-[160px] min-w-[160px] max-w-[160px] break-all">
+                        {u.snUnit}
+                      </td>
+
+                      {/* MODEL */}
+                      <td className="p-1.5 py-2 font-medium text-slate-350 w-[70px] min-w-[70px] max-w-[70px] text-center truncate">
+                        {u.model || '-'}
+                      </td>
+
+                      {/* ISSUE DESCRIPTION */}
+                      <td className="p-1.5 py-2 text-amber-500 font-medium w-[140px] min-w-[140px] max-w-[140px] truncate" title={u.issueDescription}>
+                        {u.issueDescription || '-'}
+                      </td>
+
+                      {/* LOCATION */}
+                      <td className="p-1.5 py-2 text-slate-300 w-[100px] min-w-[100px] max-w-[100px] truncate">
+                        <span className="flex items-center gap-1">
+                          <MapPin className="w-3 h-3 text-slate-450 shrink-0" />
+                          <span className="truncate">{u.location || '-'}</span>
+                        </span>
+                      </td>
+
+                      {/* UNIT STATUS */}
+                      <td className="p-1.5 py-2 text-center w-[115px] min-w-[115px] max-w-[115px] truncate">
+                        <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold inline-block leading-none tracking-tight ${getUnitStatusStyle(u.unitStatus)}`}>
+                          {formatUnitStatus(u.unitStatus)}
+                        </span>
+                      </td>
+
+                      {/* SR NUMBER */}
+                      <td className="p-1.5 py-2 font-mono text-slate-400 w-[100px] min-w-[100px] max-w-[100px] truncate" title={u.breakdownSrNumber}>
+                        {u.breakdownSrNumber || '-'}
+                      </td>
+
+                      {/* SR DATE */}
+                      <td className="p-1.5 py-2 font-mono text-slate-450 text-center w-[85px] min-w-[85px] max-w-[85px] truncate" title={u.breakdownSrDate}>
+                        {formatCompactDate(u.breakdownSrDate)}
+                      </td>
+
+                      {/* SR AGING */}
+                      <td className="p-1.5 py-2 text-center font-mono text-slate-300 w-[65px] min-w-[65px] max-w-[65px] truncate">
+                        {u.breakdownSrAging || '-'}
+                      </td>
+
+                      {/* WO NUMBER */}
+                      <td className="p-1.5 py-2 font-mono text-slate-400 w-[100px] min-w-[100px] max-w-[100px] truncate" title={u.breakdownWoNumber}>
+                        {u.breakdownWoNumber || '-'}
+                      </td>
+
+                      {/* ID TICKET */}
+                      <td className="p-1.5 py-2 font-mono text-indigo-400 text-xs font-bold text-center w-[70px] min-w-[70px] max-w-[70px] truncate">
+                        {u.idTicked || '-'}
+                      </td>
+
+                      {/* LABOUR 1-4 */}
+                      <td className="p-1.5 py-2 text-slate-400 w-[80px] min-w-[80px] max-w-[80px] truncate">{u.labour1 || '-'}</td>
+                      <td className="p-1.5 py-2 text-slate-400 w-[80px] min-w-[80px] max-w-[80px] truncate">{u.labour2 || '-'}</td>
+                      <td className="p-1.5 py-2 text-slate-400 w-[80px] min-w-[80px] max-w-[80px] truncate">{u.labour3 || '-'}</td>
+                      <td className="p-1.5 py-2 text-slate-400 w-[80px] min-w-[80px] max-w-[80px] truncate">{u.labour4 || '-'}</td>
+
+                      {/* REMARKS */}
+                      <td className="p-1.5 py-2 text-center w-[85px] min-w-[85px] max-w-[85px] truncate">
+                        {u.remarks ? (
+                          <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold tracking-wider ${remarksStyle}`}>
+                            {u.remarks}
+                          </span>
+                        ) : (
+                          <span className="text-slate-600 font-mono">-</span>
+                        )}
+                      </td>
+
+                      {/* HM RFU */}
+                      <td className="p-1.5 py-2 text-center font-mono font-bold text-emerald-400 w-[70px] min-w-[70px] max-w-[70px] truncate">
+                        {u.hmRfu || '-'}
+                      </td>
+
+                      {/* LEAD JOB DESCRIPTION */}
+                      <td className="p-1.5 py-2 text-slate-300 w-[150px] min-w-[150px] max-w-[150px] truncate" title={u.leadJobDescription}>
+                        {u.leadJobDescription || '-'}
+                      </td>
+
+                      {/* ACTION */}
+                      <td className="p-1.5 py-1 text-center w-[75px] min-w-[75px] max-w-[75px] sticky right-0 bg-slate-900 shadow-[-4px_0_10px_rgba(0,0,0,0.4)] z-10 group-hover:bg-slate-800 transition-colors duration-150">
+                        <div className="flex gap-1.5 justify-center">
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); handleOpenEdit(u); }}
+                            className="w-7 h-7 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 border border-indigo-500/20 hover:border-indigo-500/40 rounded flex flex-shrink-0 items-center justify-center transition-all cursor-pointer shadow-sm"
+                            title="Edit Breakdown Data"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setUnitToDelete(u); }}
+                            className="w-7 h-7 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 border border-rose-500/20 hover:border-rose-500/40 rounded flex flex-shrink-0 items-center justify-center transition-all cursor-pointer shadow-sm"
+                            title="Hapus Unit"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  )}
 
       {/* Spotlight Detail Flyout Modal */}
       {selectedUnit && (
@@ -2253,13 +2937,19 @@ function doPost(e) {
               </div>
 
               {/* Troubleshooting info */}
-              <div className="bg-slate-950/50 p-4 border border-rose-500/20 rounded-xl space-y-2">
-                <div className="flex items-center gap-2 text-rose-400 text-xs font-bold uppercase tracking-wide">
-                  <AlertTriangle className="h-4 w-4" />
-                  <span>Reported Machine Fault / Issue</span>
+              <div className="bg-slate-950/50 p-4 border border-orange-500/20 rounded-xl space-y-2">
+                <div className="flex items-center gap-2 text-orange-400 text-xs font-bold uppercase tracking-wide">
+                  {activeTab === 'breakdown' ? (
+                    <AlertTriangle className="h-4 w-4" />
+                  ) : (
+                    <Calendar className="h-4 w-4" />
+                  )}
+                  <span>{activeTab === 'breakdown' ? 'ISSUE DESCRIPTION' : 'Planning Schedule PM Service'}</span>
                 </div>
                 <p className="text-sm font-medium text-slate-200 bg-slate-950 p-3 rounded-lg border border-slate-850 font-mono">
-                  {selectedUnit.issueDescription || 'No active fault reported in registry.'}
+                  {activeTab === 'breakdown'
+                    ? (selectedUnit.issueDescription || '-')
+                    : (selectedUnit.planSchedulePm || selectedUnit.issueDescription || '-')}
                 </p>
               </div>
 
@@ -2326,37 +3016,111 @@ function doPost(e) {
               <div className="space-y-3">
                 <h4 className="text-xs font-bold font-mono tracking-widest text-slate-400 uppercase flex items-center gap-1.5">
                   <Hash className="w-4 h-4 text-sky-400" />
-                  Systems Administration Registries
+                  PM Systems Administration Registries
                 </h4>
                 <div className="bg-slate-950/60 p-4 border border-slate-850 rounded-xl space-y-3 text-xs">
                   
                   <div className="flex justify-between items-center pb-2.5 border-b border-slate-850">
-                    <span className="text-slate-500 font-medium">Service Request Number (SR)</span>
-                    <span className="font-mono text-slate-200 font-semibold">{selectedUnit.srNumber || '-'}</span>
+                    <span className="text-slate-500 font-medium">PM SR Number</span>
+                    <span className="font-mono text-slate-205 text-indigo-400 font-semibold">{selectedUnit.srNumber || '-'}</span>
                   </div>
 
                   <div className="flex justify-between items-center pb-2.5 border-b border-slate-850">
-                    <span className="text-slate-500 font-medium">Service Request Date</span>
-                    <span className="font-mono text-slate-205 text-slate-300">{selectedUnit.srDate || '-'}</span>
-                  </div>
-
-                  <div className="flex justify-between items-center pb-2.5 border-b border-slate-850">
-                    <span className="text-slate-500 font-medium">Work Order reference (WO)</span>
-                    <span className="font-mono text-slate-200 font-semibold">{selectedUnit.woNumber || '-'}</span>
+                    <span className="text-slate-500 font-medium">PM SR Date</span>
+                    <span className="font-mono text-slate-300">{selectedUnit.srDate || '-'}</span>
                   </div>
 
                   <div className="flex justify-between items-center">
-                    <span className="text-slate-500 font-medium">Internal Support Ticket ID</span>
-                    <span className="font-mono bg-slate-900 border border-slate-800 px-2 py-0.5 rounded text-white font-bold">{selectedUnit.idTicked || '-'}</span>
+                    <span className="text-slate-500 font-medium">PM WO Reference (WO)</span>
+                    <span className="font-mono text-slate-205 text-indigo-400 font-semibold">{selectedUnit.woNumber || '-'}</span>
                   </div>
 
                 </div>
               </div>
 
+              {/* Labour Team & Field Operations */}
+              {activeTab === 'breakdown' && (
+                <div className="space-y-3">
+                  <h4 className="text-xs font-bold font-mono tracking-widest text-slate-400 uppercase flex items-center gap-1.5">
+                    <Users className="w-4 h-4 text-indigo-400" />
+                    Field Operations & Labour Team
+                  </h4>
+                  <div className="bg-slate-950/60 p-4 border border-slate-850 rounded-xl space-y-3 text-xs">
+                    <div className="grid grid-cols-2 gap-3 pb-2.5 border-b border-slate-850">
+                      <div>
+                        <span className="text-slate-500 font-medium block">ID Ticket</span>
+                        <span className="font-mono text-indigo-400 font-bold block mt-0.5">{selectedUnit.idTicked || '-'}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 font-medium block">HM RFU</span>
+                        <span className="font-mono text-emerald-400 font-bold block mt-0.5">{selectedUnit.hmRfu || '-'}</span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 pb-2.5 border-b border-slate-850 font-mono text-[11px]">
+                      <div>
+                        <span className="text-slate-505 text-[10px] text-slate-500 font-sans font-medium block">Breakdown SR Number</span>
+                        <span className="text-amber-400 font-bold block mt-0.5">{selectedUnit.breakdownSrNumber || '-'}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-505 text-[10px] text-slate-500 font-sans font-medium block">Breakdown SR Date</span>
+                        <span className="text-slate-250 block mt-0.5 truncate" title={selectedUnit.breakdownSrDate || ''}>{selectedUnit.breakdownSrDate || '-'}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-505 text-[10px] text-slate-500 font-sans font-medium block">Breakdown SR Aging</span>
+                        <span className="text-amber-400 font-bold block mt-0.5">{selectedUnit.breakdownSrAging || '-'} days</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-505 text-[10px] text-slate-500 font-sans font-medium block">Breakdown WO Reference</span>
+                        <span className="text-slate-250 font-semibold block mt-0.5">{selectedUnit.breakdownWoNumber || '-'}</span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-3 pt-1">
+                      <div className="space-y-0.5">
+                        <span className="text-slate-500 text-[10px] uppercase font-mono block">Labour 1</span>
+                        <span className="font-medium text-slate-200 block truncate">{selectedUnit.labour1 || '-'}</span>
+                      </div>
+                      <div className="space-y-0.5">
+                        <span className="text-slate-500 text-[10px] uppercase font-mono block">Labour 2</span>
+                        <span className="font-medium text-slate-200 block truncate">{selectedUnit.labour2 || '-'}</span>
+                      </div>
+                      <div className="space-y-0.5">
+                        <span className="text-slate-500 text-[10px] uppercase font-mono block">Labour 3</span>
+                        <span className="font-medium text-slate-200 block truncate">{selectedUnit.labour3 || '-'}</span>
+                      </div>
+                      <div className="space-y-0.5">
+                        <span className="text-slate-500 text-[10px] uppercase font-mono block">Labour 4</span>
+                        <span className="font-medium text-slate-200 block truncate">{selectedUnit.labour4 || '-'}</span>
+                      </div>
+                    </div>
+
+                    {selectedUnit.leadJobDescription && (
+                      <div className="pt-2.5 border-t border-slate-850 space-y-1">
+                        <span className="text-slate-500 text-[10px] uppercase font-mono block">Lead Job Description</span>
+                        <p className="text-slate-300 font-sans leading-relaxed text-xs">{selectedUnit.leadJobDescription}</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
             </div>
 
             {/* Footer controls */}
-            <div className="bg-slate-950 p-4 border-t border-slate-850 text-right">
+            <div className="bg-slate-950 p-4 border-t border-slate-850 flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => {
+                  const target = selectedUnit;
+                  setSelectedUnit(null);
+                  handleOpenEdit(target);
+                }}
+                className="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-1.5 text-xs font-semibold rounded-lg border border-indigo-500/30 transition-all cursor-pointer flex items-center gap-1.5 shadow-md shadow-indigo-600/10 font-mono tracking-tight"
+              >
+                <Pencil className="w-3.5 h-3.5 animate-pulse" />
+                EDIT UNIT
+              </button>
               <button
                 type="button"
                 onClick={() => setSelectedUnit(null)}
@@ -2456,12 +3220,38 @@ function doPost(e) {
                   {/* Kelompok 2: Diagnosa & Status */}
                   <div className="space-y-3">
                     <h4 className="text-[10px] font-bold tracking-widest text-slate-500 uppercase font-mono border-b border-slate-800 pb-1">2. Diagnosa Troubleshoot & Status Operasional</h4>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div className="md:col-span-1">
                         <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">UNIT STATUS</label>
                         <select
                           value={editForm.unitStatus || 'Running without trouble'}
-                          onChange={(e) => setEditForm({ ...editForm, unitStatus: e.target.value })}
+                          onChange={(e) => {
+                            const nextStatus = e.target.value;
+                            const isBreakdown = nextStatus.toLowerCase().includes('breakdown');
+                            let nextJobStatus = editForm.jobStatus;
+                            let nextRemarks = editForm.remarks;
+                            if (isBreakdown) {
+                              if (!['WAITING PART', 'DELAY LABOUR', 'INPROGRESS'].includes(editForm.remarks || '')) {
+                                nextRemarks = 'INPROGRESS';
+                              }
+                              if (!['WAITING PART', 'DELAY LABOUR', 'INPROGRESS'].includes(editForm.jobStatus || '')) {
+                                nextJobStatus = 'INPROGRESS';
+                              }
+                            } else {
+                              if (['WAITING PART', 'DELAY LABOUR', 'INPROGRESS'].includes(editForm.remarks || '')) {
+                                nextRemarks = 'RFU';
+                              }
+                              if (['WAITING PART', 'DELAY LABOUR', 'INPROGRESS'].includes(editForm.jobStatus || '')) {
+                                nextJobStatus = 'RFU';
+                              }
+                            }
+                            setEditForm({ 
+                              ...editForm, 
+                              unitStatus: nextStatus,
+                              remarks: nextRemarks,
+                              jobStatus: nextJobStatus
+                            });
+                          }}
                           className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono font-semibold transition-all focus:ring-1 focus:ring-indigo-500 cursor-pointer"
                         >
                           <option value="Running with trouble">Running with trouble</option>
@@ -2470,160 +3260,354 @@ function doPost(e) {
                         </select>
                       </div>
                       <div className="md:col-span-1">
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">JOB STATUS</label>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">
+                          {activeTab === 'breakdown' ? 'REMARKS (KOLOM AF)' : 'JOB STATUS'}
+                        </label>
                         <select
                           value={
+                            activeTab === 'breakdown' ? (editForm.remarks || '') : (
                             editForm.jobStatus === 'IN PROGRESS' ? 'INPROGRESS' :
                             (editForm.jobStatus === 'READY FOR USE' || editForm.jobStatus === 'COMPLETED' || !editForm.jobStatus) ? 'RFU' : 
-                            editForm.jobStatus
+                            editForm.jobStatus)
                           }
-                          onChange={(e) => setEditForm({ ...editForm, jobStatus: e.target.value })}
+                          onChange={(e) => {
+                            const nextVal = e.target.value;
+                            let nextUnitStatus = editForm.unitStatus;
+                            if (['WAITING PART', 'DELAY LABOUR', 'INPROGRESS'].includes(nextVal)) {
+                              nextUnitStatus = 'Breakdown';
+                            } else if (nextVal === 'RFU') {
+                              nextUnitStatus = 'Running without trouble';
+                            }
+                            
+                            if (activeTab === 'breakdown') {
+                              setEditForm({ 
+                                ...editForm, 
+                                remarks: nextVal,
+                                unitStatus: nextUnitStatus
+                              });
+                            } else {
+                              setEditForm({ 
+                                ...editForm, 
+                                jobStatus: nextVal,
+                                unitStatus: nextUnitStatus
+                              });
+                            }
+                          }}
                           className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono font-semibold transition-all focus:ring-1 focus:ring-indigo-500 cursor-pointer"
                         >
+                          {activeTab === 'breakdown' && <option value="">-- No Remarks --</option>}
                           <option value="RFU">RFU</option>
                           <option value="WAITING PART">WAITING PART</option>
                           <option value="DELAY LABOUR">DELAY LABOUR</option>
                           <option value="INPROGRESS">INPROGRESS</option>
-                          <option value="NONE">None</option>
+                          {activeTab === 'pm' && <option value="NONE">None</option>}
                         </select>
                       </div>
-                      <div className="md:col-span-1">
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">ID TICKET</label>
+                      <div className="md:col-span-3">
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">
+                          {activeTab === 'breakdown' ? 'ISSUE DESCRIPTION' : 'PLANNING SCHEDULE PM'}
+                        </label>
+                        <input
+                          type="text"
+                          value={activeTab === 'breakdown' ? (editForm.issueDescription || '') : (editForm.planSchedulePm || '')}
+                          onChange={(e) => {
+                            if (activeTab === 'breakdown') {
+                              setEditForm({ ...editForm, issueDescription: e.target.value });
+                            } else {
+                              setEditForm({ ...editForm, planSchedulePm: e.target.value });
+                              setIsPmManuallyEdited(true);
+                            }
+                          }}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-slate-200 rounded-lg p-3 text-xs font-sans transition-all"
+                          placeholder={activeTab === 'breakdown' ? "e.g. Broken pipe" : "e.g. PM 250 HOURS"}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {activeTab === 'pm' && (
+                    <>
+                      {/* Kelompok 3: Telemetri */}
+                      <div className="space-y-3">
+                        <h4 className="text-[10px] font-bold tracking-widest text-slate-500 uppercase font-mono border-b border-slate-800 pb-1">3. Telemetri & Nilai Kinerja SMU</h4>
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                          <div>
+                            <label className="block text-[9px] font-bold text-slate-550 uppercase font-mono mb-1">SMU TO RUN (AUTO)</label>
+                            <input
+                              type="text"
+                              value={editForm.smuToRun || '-'}
+                              disabled
+                              className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-slate-550 uppercase font-mono mb-1">PERCENT % (AUTO)</label>
+                            <input
+                              type="text"
+                              value={editForm.percent || '-'}
+                              disabled
+                              className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-slate-550 uppercase font-mono mb-1">PLANNED SMU (AUTO)</label>
+                            <input
+                              type="text"
+                              value={editForm.plannedSmu || '-'}
+                              disabled
+                              className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-slate-400 uppercase font-mono mb-1">LAST SERV SMU</label>
+                            <input
+                              type="text"
+                              value={editForm.lastServiceSmu || ''}
+                              onChange={(e) => setEditForm({ ...editForm, lastServiceSmu: e.target.value })}
+                              className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2 text-xs font-mono text-center transition-all"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-slate-400 uppercase font-mono mb-1 text-emerald-450">AVG RUN HR/DAY</label>
+                            <input
+                              type="text"
+                              value="18"
+                              disabled
+                              className="w-full bg-slate-900/60 border border-slate-800 text-emerald-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Kelompok 4: Rencana dan Dokumen Administrasi */}
+                      <div className="space-y-3">
+                        <h4 className="text-[10px] font-bold tracking-widest text-slate-500 uppercase font-mono border-b border-slate-800 pb-1">4. Jadwal Pemeliharaan & Dokumen Administrasi</h4>
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-500 uppercase font-mono mb-1.5">PLANNED DATE (AUTO)</label>
+                            <input
+                              type="text"
+                              value={editForm.plannedDate === 'NO DATA' ? 'NO DATA' : formatCompactDate(editForm.plannedDate)}
+                              disabled
+                              className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2.5 text-xs font-mono cursor-not-allowed"
+                              placeholder="Calculated automatically"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LAST DATE SERVICE (YYYY/MM/DD)</label>
+                            <input
+                              type="text"
+                              value={editForm.lastDateService || ''}
+                              onChange={(e) => {
+                                const newDateVal = e.target.value;
+                                const originalDateVal = editingUnit?.lastDateService || '';
+                                let nextPm = editForm.planSchedulePm;
+                                
+                                if (newDateVal !== originalDateVal && !isPmManuallyEdited) {
+                                  const basePm = editingUnit?.planSchedulePm || editForm.planSchedulePm || '';
+                                  const lastServiceSmuVal = editForm.lastServiceSmu || '';
+                                  const isSmuFilled = lastServiceSmuVal && lastServiceSmuVal.trim() !== '' && lastServiceSmuVal !== '-';
+                                  const smuNum = isSmuFilled ? parseFloat(lastServiceSmuVal.replace(/[,]/g, '.')) : NaN;
+                                  nextPm = getNextPmSchedule(basePm, smuNum);
+                                } else if (newDateVal === originalDateVal && !isPmManuallyEdited) {
+                                  nextPm = editingUnit?.planSchedulePm || '';
+                                }
+                                
+                                setEditForm({
+                                  ...editForm,
+                                  lastDateService: newDateVal,
+                                  planSchedulePm: nextPm
+                                });
+                              }}
+                              className="w-full bg-slate-950 border border-slate-805 text-slate-300 rounded-lg p-2.5 text-xs font-mono focus:border-indigo-500 transition-all focus:ring-1 focus:ring-indigo-500"
+                              placeholder="e.g. 2026/06/01"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">SR NUMBER (SERVICE REQ)</label>
+                            <input
+                              type="text"
+                              value={editForm.srNumber || ''}
+                              onChange={(e) => setEditForm({ ...editForm, srNumber: e.target.value })}
+                              className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-0.5">SR DATE (TANGGAL SR)</label>
+                            <span className="block text-[9px] text-slate-500 font-mono mb-1">(YYYY/MM/DD)</span>
+                            <input
+                              type="text"
+                              value={editForm.srDate || ''}
+                              onChange={(e) => setEditForm({ ...editForm, srDate: e.target.value })}
+                              className="w-full bg-slate-950 border border-slate-805 text-slate-300 rounded-lg p-2.5 text-xs font-mono focus:border-indigo-500 transition-all focus:ring-1 focus:ring-indigo-500"
+                              placeholder="e.g. 2026-06-03T07:00:00.000Z"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-550 uppercase font-mono mb-1.5">SR AGING (AUTO)</label>
+                            <input
+                              type="text"
+                              value={editForm.srAging || '-'}
+                              disabled
+                              className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2.5 text-xs font-mono text-center cursor-not-allowed"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">WO NUMBER (WORK ORDER)</label>
+                            <input
+                              type="text"
+                              value={editForm.woNumber || ''}
+                              onChange={(e) => setEditForm({ ...editForm, woNumber: e.target.value })}
+                              className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {activeTab === 'breakdown' && (
+                  <div className="space-y-3 mt-4">
+                    <h4 className="text-[10px] font-bold tracking-widest text-slate-500 uppercase font-mono border-b border-slate-800 pb-1">
+                      5. Monitoring & Reporting Breakdown Status detail (Kolom R-AH)
+                    </h4>
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">ID TICKET (KOLOM AA)</label>
                         <input
                           type="text"
                           value={editForm.idTicked || ''}
                           onChange={(e) => setEditForm({ ...editForm, idTicked: e.target.value })}
                           className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                          placeholder="e.g. 1001"
                         />
                       </div>
-                      <div className="md:col-span-3">
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">PLANNING SCHEDULE PM</label>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LABOUR 1 (KOLOM AB)</label>
                         <input
                           type="text"
-                          value={editForm.planSchedulePm || ''}
-                          onChange={(e) => setEditForm({ ...editForm, planSchedulePm: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-slate-200 rounded-lg p-3 text-xs font-sans transition-all"
-                          placeholder="e.g. PM 250 HOURS"
+                          value={editForm.labour1 || ''}
+                          onChange={(e) => setEditForm({ ...editForm, labour1: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono transition-all"
+                          placeholder="e.g. Labour Name"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LABOUR 2 (KOLOM AC)</label>
+                        <input
+                          type="text"
+                          value={editForm.labour2 || ''}
+                          onChange={(e) => setEditForm({ ...editForm, labour2: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono transition-all"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LABOUR 3 (KOLOM AD)</label>
+                        <input
+                          type="text"
+                          value={editForm.labour3 || ''}
+                          onChange={(e) => setEditForm({ ...editForm, labour3: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono transition-all"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LABOUR 4 (KOLOM AE)</label>
+                        <input
+                          type="text"
+                          value={editForm.labour4 || ''}
+                          onChange={(e) => setEditForm({ ...editForm, labour4: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono transition-all"
+                        />
+                      </div>
+                      {activeTab !== 'breakdown' && (
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">REMARKS (KOLOM AF)</label>
+                          <select
+                            value={editForm.remarks || ''}
+                            onChange={(e) => {
+                              const nextRemarksVal = e.target.value;
+                              let nextUnitStatus = editForm.unitStatus;
+                              if (['WAITING PART', 'DELAY LABOUR', 'INPROGRESS'].includes(nextRemarksVal)) {
+                                nextUnitStatus = 'Breakdown';
+                              } else if (nextRemarksVal === 'RFU') {
+                                nextUnitStatus = 'Running without trouble';
+                              }
+                              setEditForm({
+                                ...editForm,
+                                remarks: nextRemarksVal,
+                                unitStatus: nextUnitStatus
+                              });
+                            }}
+                            className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-slate-250 rounded-lg p-2.5 text-xs font-sans transition-all"
+                          >
+                            <option value="">-- No Remarks --</option>
+                            <option value="RFU">RFU</option>
+                            <option value="WAITING PART">WAITING PART</option>
+                            <option value="DELAY LABOUR">DELAY LABOUR</option>
+                            <option value="INPROGRESS">INPROGRESS</option>
+                          </select>
+                        </div>
+                      )}
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">HM RFU (KOLOM AG)</label>
+                        <input
+                          type="text"
+                          value={editForm.hmRfu || ''}
+                          onChange={(e) => setEditForm({ ...editForm, hmRfu: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono transition-all"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LEAD JOB DESCRIPTION (KOLOM AH)</label>
+                        <input
+                          type="text"
+                          value={editForm.leadJobDescription || ''}
+                          onChange={(e) => setEditForm({ ...editForm, leadJobDescription: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-550 text-white rounded-lg p-2.5 text-xs font-mono transition-all"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-amber-500 uppercase font-mono mb-1.5">BREAKDOWN SR NUMBER</label>
+                        <input
+                          type="text"
+                          value={editForm.breakdownSrNumber || ''}
+                          onChange={(e) => setEditForm({ ...editForm, breakdownSrNumber: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-amber-500 text-amber-400 font-semibold rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                          placeholder="e.g. SR/BR/123"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-amber-500 uppercase font-mono mb-1.5">BREAKDOWN SR DATE</label>
+                        <input
+                          type="text"
+                          value={editForm.breakdownSrDate || ''}
+                          onChange={(e) => setEditForm({ ...editForm, breakdownSrDate: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-amber-500 text-amber-400 font-semibold rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                          placeholder="e.g. DD/MM/YYYY"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase font-mono mb-1.5">BREAKDOWN SR AGING</label>
+                        <input
+                          type="text"
+                          readOnly
+                          value={editForm.breakdownSrAging || '0'}
+                          className="w-full bg-slate-900/60 border border-slate-800 text-amber-400 font-bold rounded-lg p-2.5 text-xs font-mono text-center cursor-not-allowed"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-amber-500 uppercase font-mono mb-1.5">BREAKDOWN WO REFERENCE</label>
+                        <input
+                          type="text"
+                          value={editForm.breakdownWoNumber || ''}
+                          onChange={(e) => setEditForm({ ...editForm, breakdownWoNumber: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-805 focus:border-amber-500 text-amber-400 font-semibold rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                          placeholder="e.g. WO/BR/123"
                         />
                       </div>
                     </div>
                   </div>
-
-                  {/* Kelompok 3: Telemetri */}
-                  <div className="space-y-3">
-                    <h4 className="text-[10px] font-bold tracking-widest text-slate-500 uppercase font-mono border-b border-slate-800 pb-1">3. Telemetri & Nilai Kinerja SMU</h4>
-                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                      <div>
-                        <label className="block text-[9px] font-bold text-slate-550 uppercase font-mono mb-1">SMU TO RUN (AUTO)</label>
-                        <input
-                          type="text"
-                          value={editForm.smuToRun || '-'}
-                          disabled
-                          className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[9px] font-bold text-slate-550 uppercase font-mono mb-1">PERCENT % (AUTO)</label>
-                        <input
-                          type="text"
-                          value={editForm.percent || '-'}
-                          disabled
-                          className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[9px] font-bold text-slate-550 uppercase font-mono mb-1">PLANNED SMU (AUTO)</label>
-                        <input
-                          type="text"
-                          value={editForm.plannedSmu || '-'}
-                          disabled
-                          className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[9px] font-bold text-slate-400 uppercase font-mono mb-1">LAST SERV SMU</label>
-                        <input
-                          type="text"
-                          value={editForm.lastServiceSmu || ''}
-                          onChange={(e) => setEditForm({ ...editForm, lastServiceSmu: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2 text-xs font-mono text-center transition-all"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[9px] font-bold text-slate-400 uppercase font-mono mb-1 text-emerald-450">AVG RUN HR/DAY</label>
-                        <input
-                          type="text"
-                          value="18"
-                          disabled
-                          className="w-full bg-slate-900/60 border border-slate-800 text-emerald-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Kelompok 4: Rencana dan Dokumen Administrasi */}
-                  <div className="space-y-3">
-                    <h4 className="text-[10px] font-bold tracking-widest text-slate-500 uppercase font-mono border-b border-slate-800 pb-1">4. Jadwal Pemeliharaan & Dokumen Administrasi</h4>
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-500 uppercase font-mono mb-1.5">PLANNED DATE (AUTO)</label>
-                        <input
-                          type="text"
-                          value={editForm.plannedDate === 'NO DATA' ? 'NO DATA' : formatCompactDate(editForm.plannedDate)}
-                          disabled
-                          className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2.5 text-xs font-mono cursor-not-allowed"
-                          placeholder="Calculated automatically"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LAST DATE SERVICE (YYYY/MM/DD)</label>
-                        <input
-                          type="text"
-                          value={editForm.lastDateService || ''}
-                          onChange={(e) => setEditForm({ ...editForm, lastDateService: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-805 text-slate-300 rounded-lg p-2.5 text-xs font-mono focus:border-indigo-500 transition-all focus:ring-1 focus:ring-indigo-500"
-                          placeholder="e.g. 2026/06/01"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">SR NUMBER (SERVICE REQ)</label>
-                        <input
-                          type="text"
-                          value={editForm.srNumber || ''}
-                          onChange={(e) => setEditForm({ ...editForm, srNumber: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">SR DATE (TANGGAL SR)</label>
-                        <input
-                          type="text"
-                          value={editForm.srDate || ''}
-                          onChange={(e) => setEditForm({ ...editForm, srDate: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-805 text-slate-300 rounded-lg p-2.5 text-xs font-mono focus:border-indigo-500 transition-all focus:ring-1 focus:ring-indigo-500"
-                          placeholder="e.g. 2026-06-03T07:00:00.000Z"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-550 uppercase font-mono mb-1.5">SR AGING (AUTO)</label>
-                        <input
-                          type="text"
-                          value={editForm.srAging || '-'}
-                          disabled
-                          className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2.5 text-xs font-mono text-center cursor-not-allowed"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">WO NUMBER (WORK ORDER)</label>
-                        <input
-                          type="text"
-                          value={editForm.woNumber || ''}
-                          onChange={(e) => setEditForm({ ...editForm, woNumber: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
-                        />
-                      </div>
-                    </div>
-                  </div>
+                  )}
                 </div>
 
               </div>
@@ -2749,12 +3733,38 @@ function doPost(e) {
                   {/* Kelompok 2: Diagnosa & Status */}
                   <div className="space-y-3">
                     <h4 className="text-[10px] font-bold tracking-widest text-slate-500 uppercase font-mono border-b border-slate-800 pb-1">2. Diagnosa Troubleshoot & Status Operasional</h4>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div className="md:col-span-1">
                         <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">UNIT STATUS</label>
                         <select
                           value={addForm.unitStatus}
-                          onChange={(e) => setAddForm({ ...addForm, unitStatus: e.target.value })}
+                          onChange={(e) => {
+                            const nextStatus = e.target.value;
+                            const isBreakdown = nextStatus.toLowerCase().includes('breakdown');
+                            let nextJobStatus = addForm.jobStatus;
+                            let nextRemarks = addForm.remarks;
+                            if (isBreakdown) {
+                              if (!['WAITING PART', 'DELAY LABOUR', 'INPROGRESS'].includes(addForm.remarks || '')) {
+                                nextRemarks = 'INPROGRESS';
+                              }
+                              if (!['WAITING PART', 'DELAY LABOUR', 'INPROGRESS'].includes(addForm.jobStatus || '')) {
+                                nextJobStatus = 'INPROGRESS';
+                              }
+                            } else {
+                              if (['WAITING PART', 'DELAY LABOUR', 'INPROGRESS'].includes(addForm.remarks || '')) {
+                                nextRemarks = 'RFU';
+                              }
+                              if (['WAITING PART', 'DELAY LABOUR', 'INPROGRESS'].includes(addForm.jobStatus || '')) {
+                                nextJobStatus = 'RFU';
+                              }
+                            }
+                            setAddForm({ 
+                              ...addForm, 
+                              unitStatus: nextStatus,
+                              remarks: nextRemarks,
+                              jobStatus: nextJobStatus
+                            });
+                          }}
                           className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono font-semibold transition-all focus:ring-1 focus:ring-indigo-500 cursor-pointer"
                         >
                           <option value="Running with trouble">Running with trouble</option>
@@ -2763,160 +3773,346 @@ function doPost(e) {
                         </select>
                       </div>
                       <div className="md:col-span-1">
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">JOB STATUS</label>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">
+                          {activeTab === 'breakdown' ? 'REMARKS (KOLOM AF)' : 'JOB STATUS'}
+                        </label>
                         <select
-                          value={addForm.jobStatus || 'RFU'}
-                          onChange={(e) => setAddForm({ ...addForm, jobStatus: e.target.value })}
+                          value={activeTab === 'breakdown' ? (addForm.remarks || 'RFU') : (addForm.jobStatus || 'RFU')}
+                          onChange={(e) => {
+                            const nextVal = e.target.value;
+                            let nextUnitStatus = addForm.unitStatus;
+                            if (['WAITING PART', 'DELAY LABOUR', 'INPROGRESS'].includes(nextVal)) {
+                              nextUnitStatus = 'Breakdown';
+                            } else if (nextVal === 'RFU') {
+                              nextUnitStatus = 'Running without trouble';
+                            }
+                            
+                            if (activeTab === 'breakdown') {
+                              setAddForm({
+                                ...addForm,
+                                remarks: nextVal,
+                                unitStatus: nextUnitStatus
+                              });
+                            } else {
+                              setAddForm({
+                                ...addForm,
+                                jobStatus: nextVal,
+                                unitStatus: nextUnitStatus
+                              });
+                            }
+                          }}
                           className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono font-semibold transition-all focus:ring-1 focus:ring-indigo-500 cursor-pointer"
                         >
+                          {activeTab === 'breakdown' && <option value="">-- No Remarks --</option>}
                           <option value="RFU">RFU</option>
                           <option value="WAITING PART">WAITING PART</option>
                           <option value="DELAY LABOUR">DELAY LABOUR</option>
                           <option value="INPROGRESS">INPROGRESS</option>
-                          <option value="NONE">None</option>
+                          {activeTab === 'pm' && <option value="NONE">None</option>}
                         </select>
                       </div>
-                      <div className="md:col-span-1">
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">ID TICKET</label>
-                        <input
-                          type="text"
-                          placeholder="e.g. 1000999"
-                          value={addForm.idTicked}
-                          onChange={(e) => setAddForm({ ...addForm, idTicked: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
-                        />
-                      </div>
                       <div className="md:col-span-3">
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">PLANNING SCHEDULE PM</label>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">
+                          {activeTab === 'breakdown' ? 'ISSUE DESCRIPTION' : 'PLANNING SCHEDULE PM'}
+                        </label>
                         <input
                           type="text"
-                          value={addForm.planSchedulePm}
-                          onChange={(e) => setAddForm({ ...addForm, planSchedulePm: e.target.value })}
+                          value={activeTab === 'breakdown' ? (addForm.issueDescription || '') : (addForm.planSchedulePm || '')}
+                          onChange={(e) => {
+                            if (activeTab === 'breakdown') {
+                              setAddForm({ ...addForm, issueDescription: e.target.value });
+                            } else {
+                              setAddForm({ ...addForm, planSchedulePm: e.target.value });
+                              setIsAddPmManuallyEdited(true);
+                            }
+                          }}
                           className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-slate-200 rounded-lg p-3 text-xs font-sans transition-all"
-                          placeholder="e.g. PM 250 HOURS"
+                          placeholder={activeTab === 'breakdown' ? "e.g. Broken pipe" : "e.g. PM 250 HOURS"}
                         />
                       </div>
                     </div>
                   </div>
 
-                  {/* Kelompok 3: Telemetri */}
-                  <div className="space-y-3">
-                    <h4 className="text-[10px] font-bold tracking-widest text-slate-500 uppercase font-mono border-b border-slate-800 pb-1">3. Telemetri & Nilai Kinerja SMU</h4>
-                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                      <div>
-                        <label className="block text-[9px] font-bold text-slate-550 uppercase font-mono mb-1">SMU TO RUN (AUTO)</label>
-                        <input
-                          type="text"
-                          value={addForm.smuToRun || '-'}
-                          disabled
-                          className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
-                        />
+                  {activeTab === 'pm' && (
+                    <>
+                      {/* Kelompok 3: Telemetri */}
+                      <div className="space-y-3">
+                        <h4 className="text-[10px] font-bold tracking-widest text-slate-500 uppercase font-mono border-b border-slate-800 pb-1">3. Telemetri & Nilai Kinerja SMU</h4>
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                          <div>
+                            <label className="block text-[9px] font-bold text-slate-550 uppercase font-mono mb-1">SMU TO RUN (AUTO)</label>
+                            <input
+                              type="text"
+                              value={addForm.smuToRun || '-'}
+                              disabled
+                              className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-slate-550 uppercase font-mono mb-1">PERCENT % (AUTO)</label>
+                            <input
+                              type="text"
+                              value={addForm.percent || '-'}
+                              disabled
+                              className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-slate-550 uppercase font-mono mb-1">PLANNED SMU (AUTO)</label>
+                            <input
+                              type="text"
+                              value={addForm.plannedSmu || '-'}
+                              disabled
+                              className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-slate-400 uppercase font-mono mb-1">LAST SERV SMU</label>
+                            <input
+                              type="text"
+                              placeholder="-"
+                              value={addForm.lastServiceSmu}
+                              onChange={(e) => setAddForm({ ...addForm, lastServiceSmu: e.target.value })}
+                              className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2 text-xs font-mono text-center transition-all"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-slate-400 uppercase font-mono mb-1 text-emerald-450 flex items-center justify-center gap-0.5">AVG RUN/DAY</label>
+                            <input
+                              type="text"
+                              value="18"
+                              disabled
+                              className="w-full bg-slate-900/60 border border-slate-800 text-emerald-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
+                            />
+                          </div>
+                        </div>
                       </div>
-                      <div>
-                        <label className="block text-[9px] font-bold text-slate-550 uppercase font-mono mb-1">PERCENT % (AUTO)</label>
-                        <input
-                          type="text"
-                          value={addForm.percent || '-'}
-                          disabled
-                          className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[9px] font-bold text-slate-550 uppercase font-mono mb-1">PLANNED SMU (AUTO)</label>
-                        <input
-                          type="text"
-                          value={addForm.plannedSmu || '-'}
-                          disabled
-                          className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[9px] font-bold text-slate-400 uppercase font-mono mb-1">LAST SERV SMU</label>
-                        <input
-                          type="text"
-                          placeholder="-"
-                          value={addForm.lastServiceSmu}
-                          onChange={(e) => setAddForm({ ...addForm, lastServiceSmu: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2 text-xs font-mono text-center transition-all"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[9px] font-bold text-slate-400 uppercase font-mono mb-1 text-emerald-450 flex items-center justify-center gap-0.5">AVG RUN/DAY</label>
-                        <input
-                          type="text"
-                          value="18"
-                          disabled
-                          className="w-full bg-slate-900/60 border border-slate-800 text-emerald-400 font-bold rounded-lg p-2 text-xs font-mono text-center cursor-not-allowed"
-                        />
-                      </div>
-                    </div>
-                  </div>
 
-                  {/* Kelompok 4: Rencana dan Dokumen Administrasi */}
-                  <div className="space-y-3">
-                    <h4 className="text-[10px] font-bold tracking-widest text-slate-500 uppercase font-mono border-b border-slate-800 pb-1">4. Jadwal Pemeliharaan & Dokumen Administrasi</h4>
+                      {/* Kelompok 4: Rencana dan Dokumen Administrasi */}
+                      <div className="space-y-3">
+                        <h4 className="text-[10px] font-bold tracking-widest text-slate-500 uppercase font-mono border-b border-slate-800 pb-1">4. Jadwal Pemeliharaan & Dokumen Administrasi</h4>
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-505 uppercase font-mono mb-1.5">PLANNED DATE (AUTO)</label>
+                            <input
+                              type="text"
+                              value={addForm.plannedDate === 'NO DATA' ? 'NO DATA' : formatCompactDate(addForm.plannedDate)}
+                              disabled
+                              className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2.5 text-xs font-mono cursor-not-allowed"
+                              placeholder="Calculated automatically"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LAST DATE SERVICE (YYYY/MM/DD)</label>
+                            <input
+                              type="text"
+                              value={addForm.lastDateService}
+                              onChange={(e) => {
+                                const newDateVal = e.target.value;
+                                let nextPm = addForm.planSchedulePm;
+                                if (newDateVal && newDateVal.trim() !== '' && !isAddPmManuallyEdited) {
+                                  const lastServiceSmuVal = addForm.lastServiceSmu || '';
+                                  const isSmuFilled = lastServiceSmuVal && lastServiceSmuVal.trim() !== '' && lastServiceSmuVal !== '-';
+                                  const smuNum = isSmuFilled ? parseFloat(lastServiceSmuVal.replace(/[,]/g, '.')) : NaN;
+                                  nextPm = getNextPmSchedule(addForm.planSchedulePm, smuNum);
+                                }
+                                setAddForm({
+                                  ...addForm,
+                                  lastDateService: newDateVal,
+                                  planSchedulePm: nextPm
+                                });
+                              }}
+                              className="w-full bg-slate-950 border border-slate-808 text-slate-350 rounded-lg p-2.5 text-xs font-mono focus:border-indigo-500 transition-all focus:ring-1 focus:ring-indigo-500"
+                              placeholder="e.g. 01/06/2026"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">SR NUMBER (SERVICE REQ)</label>
+                            <input
+                              type="text"
+                              placeholder="e.g. SR/BJM/03"
+                              value={addForm.srNumber}
+                              onChange={(e) => setAddForm({ ...addForm, srNumber: e.target.value })}
+                              className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-0.5">SR DATE (TANGGAL SR)</label>
+                            <span className="block text-[9px] text-slate-500 font-mono mb-1">(YYYY/MM/DD)</span>
+                            <input
+                              type="text"
+                              value={addForm.srDate}
+                              onChange={(e) => setAddForm({ ...addForm, srDate: e.target.value })}
+                              className="w-full bg-slate-950 border border-slate-808 text-slate-350 rounded-lg p-2.5 text-xs font-mono focus:border-indigo-500 transition-all focus:ring-1 focus:ring-indigo-500"
+                              placeholder="e.g. 2026-06-03T07:00:00.000Z"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-550 uppercase font-mono mb-1.5">SR AGING (AUTO)</label>
+                            <input
+                              type="text"
+                              value={addForm.srAging || '-'}
+                              disabled
+                              className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2.5 text-xs font-mono text-center cursor-not-allowed"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">WO NUMBER (WORK ORDER)</label>
+                            <input
+                              type="text"
+                              placeholder="e.g. WO-UEI-04"
+                              value={addForm.woNumber}
+                              onChange={(e) => setAddForm({ ...addForm, woNumber: e.target.value })}
+                              className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {activeTab === 'breakdown' && (
+                  <div className="space-y-3 mt-4">
+                    <h4 className="text-[10px] font-bold tracking-widest text-slate-500 uppercase font-mono border-b border-slate-800 pb-1">
+                      5. Monitoring & Reporting Breakdown Status detail (Kolom R-AH)
+                    </h4>
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                       <div>
-                        <label className="block text-[10px] font-bold text-slate-505 uppercase font-mono mb-1.5">PLANNED DATE (AUTO)</label>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">ID TICKET (KOLOM AA)</label>
                         <input
                           type="text"
-                          value={addForm.plannedDate === 'NO DATA' ? 'NO DATA' : formatCompactDate(addForm.plannedDate)}
-                          disabled
-                          className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2.5 text-xs font-mono cursor-not-allowed"
-                          placeholder="Calculated automatically"
+                          value={addForm.idTicked || ''}
+                          onChange={(e) => setAddForm({ ...addForm, idTicked: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-550 text-white rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                          placeholder="e.g. 1001"
                         />
                       </div>
                       <div>
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LAST DATE SERVICE (YYYY/MM/DD)</label>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LABOUR 1 (KOLOM AB)</label>
                         <input
                           type="text"
-                          value={addForm.lastDateService}
-                          onChange={(e) => setAddForm({ ...addForm, lastDateService: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-808 text-slate-350 rounded-lg p-2.5 text-xs font-mono focus:border-indigo-500 transition-all focus:ring-1 focus:ring-indigo-500"
-                          placeholder="e.g. 01/06/2026"
+                          value={addForm.labour1 || ''}
+                          onChange={(e) => setAddForm({ ...addForm, labour1: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono transition-all"
+                          placeholder="e.g. Labour Name"
                         />
                       </div>
                       <div>
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">SR NUMBER (SERVICE REQ)</label>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LABOUR 2 (KOLOM AC)</label>
                         <input
                           type="text"
-                          placeholder="e.g. SR/BJM/03"
-                          value={addForm.srNumber}
-                          onChange={(e) => setAddForm({ ...addForm, srNumber: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                          value={addForm.labour2 || ''}
+                          onChange={(e) => setAddForm({ ...addForm, labour2: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-505 text-white rounded-lg p-2.5 text-xs font-mono transition-all"
                         />
                       </div>
                       <div>
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">SR DATE (TANGGAL SR)</label>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LABOUR 3 (KOLOM AD)</label>
                         <input
                           type="text"
-                          value={addForm.srDate}
-                          onChange={(e) => setAddForm({ ...addForm, srDate: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-808 text-slate-350 rounded-lg p-2.5 text-xs font-mono focus:border-indigo-500 transition-all focus:ring-1 focus:ring-indigo-500"
-                          placeholder="e.g. 2026-06-03T07:00:00.000Z"
+                          value={addForm.labour3 || ''}
+                          onChange={(e) => setAddForm({ ...addForm, labour3: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-505 text-white rounded-lg p-2.5 text-xs font-mono transition-all"
                         />
                       </div>
                       <div>
-                        <label className="block text-[10px] font-bold text-slate-550 uppercase font-mono mb-1.5">SR AGING (AUTO)</label>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LABOUR 4 (KOLOM AE)</label>
                         <input
                           type="text"
-                          value={addForm.srAging || '-'}
-                          disabled
-                          className="w-full bg-slate-900/60 border border-slate-800 text-sky-400 font-bold rounded-lg p-2.5 text-xs font-mono text-center cursor-not-allowed"
+                          value={addForm.labour4 || ''}
+                          onChange={(e) => setAddForm({ ...addForm, labour4: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-505 text-white rounded-lg p-2.5 text-xs font-mono transition-all"
+                        />
+                      </div>
+                      {activeTab !== 'breakdown' && (
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">REMARKS (KOLOM AF)</label>
+                          <select
+                            value={addForm.remarks || ''}
+                            onChange={(e) => {
+                              const nextRemarksVal = e.target.value;
+                              let nextUnitStatus = addForm.unitStatus;
+                              if (['WAITING PART', 'DELAY LABOUR', 'INPROGRESS'].includes(nextRemarksVal)) {
+                                nextUnitStatus = 'Breakdown';
+                              } else if (nextRemarksVal === 'RFU') {
+                                nextUnitStatus = 'Running without trouble';
+                              }
+                              setAddForm({
+                                ...addForm,
+                                remarks: nextRemarksVal,
+                                unitStatus: nextUnitStatus
+                              });
+                            }}
+                            className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-slate-250 rounded-lg p-2.5 text-xs font-sans transition-all"
+                          >
+                            <option value="">-- No Remarks --</option>
+                            <option value="RFU">RFU</option>
+                            <option value="WAITING PART">WAITING PART</option>
+                            <option value="DELAY LABOUR">DELAY LABOUR</option>
+                            <option value="INPROGRESS">INPROGRESS</option>
+                          </select>
+                        </div>
+                      )}
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">HM RFU (KOLOM AG)</label>
+                        <input
+                          type="text"
+                          value={addForm.hmRfu || ''}
+                          onChange={(e) => setAddForm({ ...addForm, hmRfu: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono transition-all"
                         />
                       </div>
                       <div>
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">WO NUMBER (WORK ORDER)</label>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">LEAD JOB DESCRIPTION (KOLOM AH)</label>
                         <input
                           type="text"
-                          placeholder="e.g. WO-UEI-04"
-                          value={addForm.woNumber}
-                          onChange={(e) => setAddForm({ ...addForm, woNumber: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                          value={addForm.leadJobDescription || ''}
+                          onChange={(e) => setAddForm({ ...addForm, leadJobDescription: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-550 text-white rounded-lg p-2.5 text-xs font-mono transition-all"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-amber-500 uppercase font-mono mb-1.5">BREAKDOWN SR NUMBER</label>
+                        <input
+                          type="text"
+                          value={addForm.breakdownSrNumber || ''}
+                          onChange={(e) => setAddForm({ ...addForm, breakdownSrNumber: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-amber-500 text-amber-400 font-semibold rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                          placeholder="e.g. SR/BR/123"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-amber-500 uppercase font-mono mb-1.5">BREAKDOWN SR DATE</label>
+                        <input
+                          type="text"
+                          value={addForm.breakdownSrDate || ''}
+                          onChange={(e) => setAddForm({ ...addForm, breakdownSrDate: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-amber-500 text-amber-400 font-semibold rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                          placeholder="e.g. DD/MM/YYYY"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase font-mono mb-1.5">BREAKDOWN SR AGING</label>
+                        <input
+                          type="text"
+                          readOnly
+                          value={addForm.breakdownSrAging || '0'}
+                          className="w-full bg-slate-900/60 border border-slate-800 text-amber-400 font-bold rounded-lg p-2.5 text-xs font-mono text-center cursor-not-allowed"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-amber-500 uppercase font-mono mb-1.5">BREAKDOWN WO REFERENCE</label>
+                        <input
+                          type="text"
+                          value={addForm.breakdownWoNumber || ''}
+                          onChange={(e) => setAddForm({ ...addForm, breakdownWoNumber: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-805 focus:border-amber-500 text-amber-400 font-semibold rounded-lg p-2.5 text-xs font-mono uppercase transition-all"
+                          placeholder="e.g. WO/BR/123"
                         />
                       </div>
                     </div>
                   </div>
+                  )}
                 </div>
 
               </div>
@@ -2951,6 +4147,53 @@ function doPost(e) {
       )}
 
       {/* Configuration Modal */}
+      {unitToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl max-w-sm w-full overflow-hidden flex flex-col p-6">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-12 h-12 bg-rose-500/10 text-rose-400 rounded-full flex items-center justify-center mb-4 border border-rose-500/20">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <h3 className="text-lg font-bold text-white mb-2">Hapus Unit?</h3>
+              <p className="text-sm text-slate-400 mb-6">
+                Apakah Anda yakin ingin menghapus Unit
+                <strong className="text-white mx-1">{unitToDelete.snUnit}</strong>
+                secara permanen?
+              </p>
+              
+              {deleteErrorMsg && (
+                <div className="w-full bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs px-4 py-3 rounded-lg mb-6">
+                  {deleteErrorMsg}
+                </div>
+              )}
+
+              <div className="flex items-center gap-3 w-full">
+                <button
+                  type="button"
+                  onClick={() => setUnitToDelete(null)}
+                  disabled={deleteLoading}
+                  className="flex-1 px-4 py-2 bg-transparent text-slate-300 hover:bg-slate-800 border border-slate-700 rounded-lg text-sm font-medium transition-all focus:outline-none focus:ring-2 focus:ring-slate-500 disabled:opacity-50"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeleteUnit}
+                  disabled={deleteLoading}
+                  className="flex-1 px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-sm font-bold shadow-md shadow-rose-600/20 transition-all focus:outline-none focus:ring-2 focus:ring-rose-500 disabled:opacity-50 flex items-center justify-center"
+                >
+                  {deleteLoading ? (
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                  ) : (
+                    'Hapus Unit'
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {configModalOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl flex flex-col">
@@ -3027,6 +4270,27 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
     
+    // ACTION: DELETE UNIT
+    if (payload.action === 'delete') {
+      var snToDelete = String(payload.snUnit).trim();
+      var rowToDelete = -1;
+      for (var r = headerRowIndex + 1; r < data.length; r++) {
+        if (String(data[r][snColIdx]).trim() === snToDelete) {
+          rowToDelete = r;
+          break;
+        }
+      }
+      if (rowToDelete !== -1) {
+        var activeSheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+        activeSheet.deleteRow(rowToDelete + 1);
+        return ContentService.createTextOutput(JSON.stringify({ success: true, message: "Unit deleted successfully" }))
+          .setMimeType(ContentService.MimeType.JSON);
+      } else {
+        return ContentService.createTextOutput(JSON.stringify({ success: false, error: "Unit not found for deletion" }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+    
     var snToMatch = String(payload.snUnit).trim();
     if (!snToMatch) {
       return ContentService.createTextOutput(JSON.stringify({ success: false, error: "snUnit parameter is empty" }))
@@ -3041,10 +4305,11 @@ function doPost(e) {
       }
     }
     
-    function getNormalizedKey(key) {
+    function getNormalizedKey(key, colIndex) {
       var norm = key.toLowerCase().replace(/[^a-z0-9%\\s]/g, '').replace(/\\s+/g, ' ').trim();
       if (norm.indexOf('sn unit') !== -1 || norm.indexOf('snunit') !== -1) return 'snUnit';
       if (norm === 'model') return 'model';
+      if (norm.indexOf('plan schedule pm') !== -1 || norm.indexOf('planning schedule') !== -1 || norm.indexOf('pm schedule') !== -1) return 'planSchedulePm';
       if (norm.indexOf('issue description') !== -1 || norm.indexOf('issue') !== -1) return 'issueDescription';
       if (norm === 'location') return 'location';
       if (norm.indexOf('unit status') !== -1 || norm.indexOf('unitstatus') !== -1) return 'unitStatus';
@@ -3055,18 +4320,31 @@ function doPost(e) {
       if (norm.indexOf('last date service') !== -1 || norm.indexOf('lastdate') !== -1) return 'lastDateService';
       if (norm.indexOf('last service smu') !== -1 || norm.indexOf('lastservice') !== -1) return 'lastServiceSmu';
       if (norm.indexOf('averang') !== -1 || norm.indexOf('average') !== -1) return 'averageUnitRun';
-      if (norm.indexOf('sr number') !== -1 || norm.indexOf('srnumber') !== -1) return 'srNumber';
-      if (norm.indexOf('sr date') !== -1 || norm.indexOf('srdate') !== -1) return 'srDate';
-      if (norm.indexOf('sr aging') !== -1 || norm.indexOf('sraging') !== -1) return 'srAging';
-      if (norm.indexOf('wo number') !== -1 || norm.indexOf('wonumber') !== -1) return 'woNumber';
-      if (norm.indexOf('id ticked') !== -1 || norm.indexOf('idticket') !== -1 || norm.indexOf('id ticket') !== -1) return 'idTicked';
+      if (norm.indexOf('breakdown sr number') !== -1 || norm.indexOf('breakdownsrnumber') !== -1 || norm.indexOf('sr breakdown') !== -1 || norm.indexOf('srnumberbreakdown') !== -1) return 'breakdownSrNumber';
+      if (norm.indexOf('breakdown sr date') !== -1 || norm.indexOf('breakdownsrdate') !== -1 || norm.indexOf('sr date breakdown') !== -1) return 'breakdownSrDate';
+      if (norm.indexOf('breakdown sr aging') !== -1 || norm.indexOf('breakdownsraging') !== -1 || norm.indexOf('sr aging breakdown') !== -1) return 'breakdownSrAging';
+      if (norm.indexOf('breakdown wo number') !== -1 || norm.indexOf('breakdownwonumber') !== -1 || norm.indexOf('wo breakdown') !== -1 || norm.indexOf('wonumberbreakdown') !== -1) return 'breakdownWoNumber';
+      
+      if (norm.indexOf('sr number') !== -1 || norm.indexOf('srnumber') !== -1) return (typeof colIndex !== 'undefined' && colIndex >= 17) ? 'breakdownSrNumber' : 'srNumber';
+      if (norm.indexOf('sr date') !== -1 || norm.indexOf('srdate') !== -1) return (typeof colIndex !== 'undefined' && colIndex >= 17) ? 'breakdownSrDate' : 'srDate';
+      if (norm.indexOf('sr aging') !== -1 || norm.indexOf('sraging') !== -1) return (typeof colIndex !== 'undefined' && colIndex >= 17) ? 'breakdownSrAging' : 'srAging';
+      if (norm.indexOf('wo number') !== -1 || norm.indexOf('wonumber') !== -1) return (typeof colIndex !== 'undefined' && colIndex >= 17) ? 'breakdownWoNumber' : 'woNumber';
+      
       if (norm.indexOf('job status') !== -1 || norm.indexOf('jobstatus') !== -1) return 'jobStatus';
+      if (norm.indexOf('id ticket') !== -1 || norm.indexOf('idticket') !== -1 || norm.indexOf('id ticked') !== -1 || norm.indexOf('idticked') !== -1) return 'idTicked';
+      if (norm.indexOf('labour 1') !== -1 || norm.indexOf('labour1') !== -1) return 'labour1';
+      if (norm.indexOf('labour 2') !== -1 || norm.indexOf('labour2') !== -1) return 'labour2';
+      if (norm.indexOf('labour 3') !== -1 || norm.indexOf('labour3') !== -1) return 'labour3';
+      if (norm.indexOf('labour 4') !== -1 || norm.indexOf('labour4') !== -1) return 'labour4';
+      if (norm.indexOf('remarks') !== -1) return 'remarks';
+      if (norm.indexOf('hm rfu') !== -1 || norm.indexOf('hmrfu') !== -1) return 'hmRfu';
+      if (norm.indexOf('lead job') !== -1 || norm.indexOf('leadjob') !== -1) return 'leadJobDescription';
       return '';
     }
     
     var keyToColIdx = {};
     for (var col = 0; col < headers.length; col++) {
-      var normKey = getNormalizedKey(headers[col]);
+      var normKey = getNormalizedKey(headers[col], col);
       if (normKey) {
         keyToColIdx[normKey] = col;
       }
