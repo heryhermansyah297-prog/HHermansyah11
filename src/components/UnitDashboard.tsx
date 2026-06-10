@@ -41,6 +41,7 @@ import {
 interface UnitData {
   snUnit: string;
   model: string;
+  planSchedulePm: string;
   issueDescription: string;
   location: string;
   unitStatus: string;
@@ -129,11 +130,13 @@ const enrichUnitWithCalculations = (u: UnitData): UnitData => {
   // 1. PLANNED SMU
   const lastServiceSmuVal = u.lastServiceSmu;
   const isLastServiceSmuFilled = lastServiceSmuVal && lastServiceSmuVal.trim() !== '' && lastServiceSmuVal !== '-';
-  const lastServiceSmuNum = isLastServiceSmuFilled ? parseFloat(lastServiceSmuVal.replace(/[,]/g, '')) : NaN;
+  const lastServiceSmuNum = isLastServiceSmuFilled ? parseFloat(lastServiceSmuVal.replace(/[,]/g, '.')) : NaN;
   
   let plannedSmu = 'NO DATA';
   if (!isNaN(lastServiceSmuNum)) {
-    plannedSmu = String(Math.round(lastServiceSmuNum + 250));
+    const rawPlannedSmu = lastServiceSmuNum + 250;
+    // Format to 1 decimal place, remove .0 suffix, then convert dot to comma
+    plannedSmu = parseFloat(rawPlannedSmu.toFixed(1)).toString().replace('.', ',');
   }
 
   // 2. PLANNED DATE
@@ -160,13 +163,14 @@ const enrichUnitWithCalculations = (u: UnitData): UnitData => {
     // 4. SMU TO RUNNum
     let smuToRunNum = 250;
     if (isLastServiceSmuFilled && lastDateObj) {
-      const diffMs = today.getTime() - lastDateObj.getTime();
-      const elapsedDays = diffMs / (24 * 60 * 60 * 1000);
+      const adjustedLastDate = new Date(lastDateObj.getTime() + 17 * 60 * 60 * 1000);
+      const diffMs = today.getTime() - adjustedLastDate.getTime();
+      const elapsedDays = Math.max(0, diffMs / (24 * 60 * 60 * 1000));
       smuToRunNum = 250 - (elapsedDays * runRate);
     }
     
   // Formula: ((250 - smuToRunNum) / 250) * 100
-    percentNum = ((250 - smuToRunNum) / 250) * 100;
+    percentNum = Math.max(0, ((250 - smuToRunNum) / 250) * 100);
   }
   
   // Clean percent
@@ -180,8 +184,9 @@ const enrichUnitWithCalculations = (u: UnitData): UnitData => {
         // breakdown: stop decreasing, keep previous value
         smuToRun = u.smuToRun && u.smuToRun !== '-' ? u.smuToRun : '250';
     } else if (lastDateObj) {
-      const diffMs = today.getTime() - lastDateObj.getTime();
-      const elapsedDays = diffMs / (24 * 60 * 60 * 1000);
+      const adjustedLastDate = new Date(lastDateObj.getTime() + 17 * 60 * 60 * 1000);
+      const diffMs = today.getTime() - adjustedLastDate.getTime();
+      const elapsedDays = Math.max(0, diffMs / (24 * 60 * 60 * 1000));
       const smuToRunNum = 250 - (elapsedDays * runRate);
       smuToRun = String(Math.round(smuToRunNum));
     } else {
@@ -198,8 +203,28 @@ const enrichUnitWithCalculations = (u: UnitData): UnitData => {
     srAging = String(elapsedDays);
   }
 
+  // 6. PLANNING SCHEDULE PM
+  let planSchedulePm = u.planSchedulePm || u.issueDescription || ''; // Default to existing value or issueDescription for migration
+  if (isLastServiceSmuFilled && (!u.planSchedulePm || u.planSchedulePm === '')) {
+    const val = lastServiceSmuNum;
+    const base = Math.floor(val / 250);
+    const mod = val % 250;
+    
+    if (mod >= 0 && mod <= 125) {
+      if (base % 2 === 0) {
+        planSchedulePm = "PM 250 HOURS";
+      } else {
+        if (base === 1 || base === 5) planSchedulePm = "PM 500 HOURS";
+        else if (base === 3) planSchedulePm = "PM 1000 HOURS";
+        else if (base === 7) planSchedulePm = "PM 2000 HOURS";
+        else planSchedulePm = "PM 250 HOURS"; // Fallback
+      }
+    }
+  }
+
   return {
     ...u,
+    planSchedulePm, 
     plannedSmu,
     plannedDate,
     percent,
@@ -332,62 +357,6 @@ export default function UnitDashboard() {
     return weekOptions[0]?.key || '';
   }, [weekOptions, selectedWeekKey]);
 
-  // Aggregate job status service counts per selected week
-  const weeklyJobStatusData = useMemo(() => {
-    const activeMonday = weekOptions.find(opt => opt.key === activeWeekKey)?.monday;
-    if (!activeMonday) {
-      return [
-        { name: 'INPROGRESS', jumlah: 0, fill: '#eab308' },
-        { name: 'DELAY LABOUR', jumlah: 0, fill: '#ef4444' },
-        { name: 'WAITING PART', jumlah: 0, fill: '#ec4899' },
-        { name: 'NEED SERVICE', jumlah: 0, fill: '#f97316' },
-        { name: 'RFU', jumlah: 0, fill: '#10b981' }
-      ];
-    }
-    
-    let inProgress = 0;
-    let delayLabour = 0;
-    let waitingPart = 0;
-    let rfu = 0;
-    let needService = 0;
-    
-    enrichedUnits.forEach(u => {
-      const smuVal = parseInt(u.smuToRun, 10);
-      const isNeedService = !isNaN(smuVal) && smuVal <= 50;
-      const belongsToWeek = isDateInWeek(u.srDate, activeMonday);
-      
-      if (belongsToWeek) {
-        if (isNeedService) {
-          needService++;
-        } else {
-          const jobStatus = (u.jobStatus || '').trim().toUpperCase();
-          if (jobStatus === 'INPROGRESS' || jobStatus === 'IN PROGRESS') {
-            inProgress++;
-          } else if (jobStatus === 'DELAY LABOUR') {
-            delayLabour++;
-          } else if (jobStatus === 'WAITING PART') {
-            waitingPart++;
-          } else if (jobStatus === 'RFU' || jobStatus === 'READY FOR USE' || jobStatus === 'COMPLETED') {
-            rfu++;
-          }
-        }
-      } else if (isNeedService) {
-        const currentMonday = getMondayOfDate(new Date());
-        if (activeMonday.getTime() === currentMonday.getTime()) {
-          needService++;
-        }
-      }
-    });
-    
-    return [
-      { name: 'INPROGRESS', jumlah: inProgress, fill: '#eab308' },
-      { name: 'DELAY LABOUR', jumlah: delayLabour, fill: '#ef4444' },
-      { name: 'WAITING PART', jumlah: waitingPart, fill: '#ec4899' },
-      { name: 'NEED SERVICE', jumlah: needService, fill: '#f97316' },
-      { name: 'RFU', jumlah: rfu, fill: '#10b981' }
-    ];
-  }, [enrichedUnits, activeWeekKey, weekOptions]);
-
   // States for Editing/Updating Unit
   const [editingUnit, setEditingUnit] = useState<UnitData | null>(null);
   const [editForm, setEditForm] = useState<UnitData | null>(null);
@@ -400,6 +369,7 @@ export default function UnitDashboard() {
   const [addForm, setAddForm] = useState<UnitData>({
     snUnit: '',
     model: '',
+    planSchedulePm: '',
     issueDescription: '',
     location: '',
     unitStatus: 'Running without trouble',
@@ -826,17 +796,39 @@ export default function UnitDashboard() {
 
   // Bar Chart Data for Job Status
   const jobStatusChartData = useMemo(() => {
-    const counts: Record<string, number> = {};
+    let inProgress = 0;
+    let delayLabour = 0;
+    let waitingPart = 0;
+    let rfu = 0;
+    let needService = 0;
+
     enrichedUnits.forEach(u => {
-      const job = u.jobStatus || 'NONE';
-      if (job.trim() !== '') {
-        counts[job] = (counts[job] || 0) + 1;
+      const smuVal = parseInt(u.smuToRun, 10);
+      const isNeedService = !isNaN(smuVal) && smuVal <= 50;
+      const jobStatus = (u.jobStatus || '').trim().toUpperCase();
+
+      if (isNeedService || jobStatus === 'NEED SERVICE') {
+        needService++;
+      }
+
+      if (jobStatus === 'INPROGRESS' || jobStatus === 'IN PROGRESS') {
+        inProgress++;
+      } else if (jobStatus === 'DELAY LABOUR') {
+        delayLabour++;
+      } else if (jobStatus === 'WAITING PART') {
+        waitingPart++;
+      } else if (jobStatus === 'RFU' || jobStatus === 'READY FOR USE' || jobStatus === 'COMPLETED') {
+        rfu++;
       }
     });
-    return Object.entries(counts).map(([status, count]) => ({
-      name: status,
-      jumlah: count
-    }));
+
+    return [
+      { name: 'INPROGRESS', jumlah: inProgress, fill: '#eab308' },
+      { name: 'DELAY LABOUR', jumlah: delayLabour, fill: '#ef4444' },
+      { name: 'WAITING PART', jumlah: waitingPart, fill: '#ec4899' },
+      { name: 'NEED SERVICE', jumlah: needService, fill: '#f97316' },
+      { name: 'RFU', jumlah: rfu, fill: '#10b981' }
+    ];
   }, [enrichedUnits]);
 
   // Bar Chart Data for Regional Location
@@ -1036,6 +1028,7 @@ export default function UnitDashboard() {
     setAddForm({
       snUnit: '',
       model: '',
+      planSchedulePm: '',
       issueDescription: '',
       location: '',
       unitStatus: 'Running without trouble',
@@ -1716,10 +1709,13 @@ function doPost(e) {
         </div>
 
         {/* Metric 6 */}
-        <div className="bg-slate-900 border border-slate-800/80 p-4 rounded-xl flex flex-col justify-between hover:border-slate-700/50 transition-all">
-          <span className="text-xs text-sky-400 font-semibold uppercase tracking-wider">Need Service</span>
+        <div className="bg-slate-900 border border-slate-800/80 p-4 rounded-xl flex flex-col justify-between hover:border-slate-700/50 transition-all relative">
+          <div className="flex items-center gap-1.5 absolute top-2 right-2">
+            <AlertTriangle className="w-4 h-4 text-red-500" />
+          </div>
+          <span className="text-xs text-red-500 font-semibold uppercase tracking-wider">NEED SERVICE PM</span>
           <div className="flex items-baseline gap-2 mt-2">
-            <span className="text-3xl font-extrabold text-sky-400">{stats.needServiceCount}</span>
+            <span className="text-3xl font-extrabold text-red-500">{stats.needServiceCount}</span>
             <span className="text-xs text-slate-500 font-mono">Units</span>
           </div>
         </div>
@@ -1791,28 +1787,15 @@ function doPost(e) {
         <div className="bg-slate-900/40 p-6 rounded-2xl border border-slate-800/80 flex flex-col justify-between min-h-[360px]">
           <div>
             <div className="flex items-center justify-between gap-2">
-              <h3 className="text-base font-bold text-slate-200">Maintenance Job Service</h3>
-              
-              {/* Dropdown week selection */}
-              <select
-                value={activeWeekKey}
-                onChange={(e) => setSelectedWeekKey(e.target.value)}
-                className="bg-slate-950 border border-slate-800 text-slate-350 rounded-lg px-2.5 py-1 text-xs font-mono outline-none focus:border-sky-500/50 transition-all w-auto min-w-[210px] md:min-w-[230px] cursor-pointer"
-              >
-                {weekOptions.map(opt => (
-                  <option key={opt.key} value={opt.key} className="bg-slate-950 text-slate-200 font-mono">
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+              <h3 className="text-base font-bold text-slate-200">NEED SERVICE PM</h3>
             </div>
-            <p className="text-xs text-slate-400 mt-1">Pending maintenance categories counted weekly by Service Request Date</p>
+            <p className="text-xs text-slate-400 mt-1">Maintenance categories counted by total job status</p>
           </div>
 
           <div className="h-56 mt-4">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
-                data={weeklyJobStatusData}
+                data={jobStatusChartData}
                 margin={{ top: 10, right: 10, left: -20, bottom: 5 }}
               >
                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
@@ -1821,6 +1804,7 @@ function doPost(e) {
                   stroke="#64748b" 
                   fontSize={10}
                   tickLine={false}
+                  interval={0}
                 />
                 <YAxis stroke="#64748b" fontSize={11} tickLine={false} allowDecimals={false} />
                 <Tooltip
@@ -1828,7 +1812,7 @@ function doPost(e) {
                   contentStyle={{ backgroundColor: '#020617', borderColor: '#1e293b', borderRadius: '8px' }}
                 />
                 <Bar dataKey="jumlah" radius={[4, 4, 0, 0]}>
-                  {weeklyJobStatusData.map((entry) => (
+                  {jobStatusChartData.map((entry) => (
                     <Cell key={`cell-${entry.name}`} fill={entry.fill} />
                   ))}
                 </Bar>
@@ -1837,7 +1821,7 @@ function doPost(e) {
           </div>
 
           <div className="flex flex-wrap gap-x-4 gap-y-2 justify-center text-[10px] pt-4 border-t border-slate-800/60 mt-2 font-mono">
-            {weeklyJobStatusData.map(item => (
+            {jobStatusChartData.map(item => (
               <div key={item.name} className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: item.fill }}></span>
                 <span className="text-slate-400">{item.name} ({item.jumlah})</span>
@@ -2032,7 +2016,7 @@ function doPost(e) {
               <tr className="border-b border-slate-800 bg-slate-950/60 text-slate-400 text-[10px] uppercase tracking-wider font-mono">
                 <th className="p-1.5 py-2.5 pl-4 sticky left-0 bg-slate-950/90 shadow-[4px_0_10px_rgba(0,0,0,0.4)] z-10">SN UNIT</th>
                 <th className="p-1.5 py-2.5 text-center">MODEL</th>
-                <th className="p-1.5 py-2.5 min-w-[130px]">ISSUE DESCRIPTION</th>
+                <th className="p-1.5 py-2.5 min-w-[130px]">PLANNING SCHEDULE PM</th>
                 <th className="p-1.5 py-2.5">LOCATION</th>
                 <th className="p-1.5 py-2.5 text-center">UNIT STATUS</th>
                 <th className="p-1.5 py-2.5 text-center">SMU TO RUN</th>
@@ -2076,9 +2060,9 @@ function doPost(e) {
                       {u.model || '-'}
                     </td>
                     
-                    {/* ISSUE DESCRIPTION */}
-                    <td className="p-1.5 py-2 max-w-[160px] truncate font-bold text-orange-500" title={u.issueDescription}>
-                      {u.issueDescription || '-'}
+                    {/* PLANNING SCHEDULE PM */}
+                    <td className="p-1.5 py-2 max-w-[160px] truncate font-bold text-orange-500" title={u.planSchedulePm}>
+                      {u.planSchedulePm || '-'}
                     </td>
                     
                     {/* LOCATION */}
@@ -2513,13 +2497,13 @@ function doPost(e) {
                         />
                       </div>
                       <div className="md:col-span-3">
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">DESKRIPSI KERUSAKAN / MASALAH (ISSUE DESCRIPTION)</label>
-                        <textarea
-                          rows={3}
-                          value={editForm.issueDescription || ''}
-                          onChange={(e) => setEditForm({ ...editForm, issueDescription: e.target.value })}
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">PLANNING SCHEDULE PM</label>
+                        <input
+                          type="text"
+                          value={editForm.planSchedulePm || ''}
+                          onChange={(e) => setEditForm({ ...editForm, planSchedulePm: e.target.value })}
                           className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-slate-200 rounded-lg p-3 text-xs font-sans transition-all"
-                          placeholder="Masukkan rincian kerusakan atau temuan problem di lapangan..."
+                          placeholder="e.g. PM 250 HOURS"
                         />
                       </div>
                     </div>
@@ -2803,13 +2787,13 @@ function doPost(e) {
                         />
                       </div>
                       <div className="md:col-span-3">
-                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">DESKRIPSI KERUSAKAN / MASALAH (ISSUE DESCRIPTION)</label>
-                        <textarea
-                          rows={3}
-                          value={addForm.issueDescription}
-                          onChange={(e) => setAddForm({ ...addForm, issueDescription: e.target.value })}
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase font-mono mb-1.5">PLANNING SCHEDULE PM</label>
+                        <input
+                          type="text"
+                          value={addForm.planSchedulePm}
+                          onChange={(e) => setAddForm({ ...addForm, planSchedulePm: e.target.value })}
                           className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-slate-200 rounded-lg p-3 text-xs font-sans transition-all"
-                          placeholder="Masukkan rincian kerusakan atau temuan problem di lapangan..."
+                          placeholder="e.g. PM 250 HOURS"
                         />
                       </div>
                     </div>
