@@ -71,6 +71,8 @@ interface UnitData {
   breakdownSrDate?: string;
   breakdownSrAging?: string;
   breakdownWoNumber?: string;
+  timestamp?: number;
+  _localId?: string;
 }
 
 // Helper to parse dates safely across multiple formats (e.g. ISO 8601, DD/MM/YYYY, etc.)
@@ -352,9 +354,11 @@ const formatUnitStatus = (status: string | null | undefined): string => {
 export default function UnitDashboard() {
   const [units, setUnits] = useState<UnitData[]>([]);
 
-  // Automatically compute all dynamic mathematical formulas
+  // Automatically compute all dynamic mathematical formulas and ensure freshest appear at top
   const enrichedUnits = useMemo(() => {
-    return units.map(enrichUnitWithCalculations);
+    return units
+      .map(enrichUnitWithCalculations)
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   }, [units]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -684,6 +688,12 @@ export default function UnitDashboard() {
 
       const rawUnits = Array.isArray(data) ? data : [];
 
+      // Add a stable local ID to each fetched unit to support duplicates safely
+      const unitsWithIds = rawUnits.map((u, i) => ({
+        ...u,
+        _localId: u._localId || `${u.snUnit}-${i}-${u.srDate || u.breakdownSrDate || '0'}`
+      }));
+
       // Load latest overrides from localStorage to bypass potential React state closure delays
       let currentOverrides: Record<string, UnitData> = {};
       try {
@@ -696,16 +706,22 @@ export default function UnitDashboard() {
       }
 
       // Merge Google Sheets index data with our local unsynced overrides
-      const merged = rawUnits.map((item) => {
+      const merged = unitsWithIds.map((item) => {
+        const overrideKey = item._localId || item.snUnit;
+        if (currentOverrides[overrideKey]) {
+          return { ...currentOverrides[overrideKey], _localId: item._localId };
+        }
+        // Fallback for older overrides that used only snUnit
         if (currentOverrides[item.snUnit]) {
-          return currentOverrides[item.snUnit];
+          return { ...currentOverrides[item.snUnit], _localId: item._localId };
         }
         return item;
       });
 
       // Also append newly added units that are not in the Google Sheet yet
-      const rawSns = new Set(rawUnits.map((u) => u.snUnit));
-      const addedUnits = Object.values(currentOverrides).filter((u) => !rawSns.has(u.snUnit));
+      // Use localId for set to handle duplicates
+      const sheetIds = new Set(unitsWithIds.map((u) => u._localId));
+      const addedUnits = Object.values(currentOverrides).filter((u) => u._localId && !sheetIds.has(u._localId));
 
       setUnits([...addedUnits, ...merged]);
     } catch (err: any) {
@@ -1078,11 +1094,13 @@ export default function UnitDashboard() {
 
       // 1. Immediately store in local state for instant user feedback
       setUnits((prev) => 
-        prev.map((item) => item.snUnit === editForm.snUnit ? computedForm : item)
+        prev.map((item) => (item._localId && item._localId === editForm._localId ? computedForm : 
+                          (!item._localId && item.snUnit === editForm.snUnit) ? computedForm : item))
       );
 
       // 2. Persist in local overrides and register as unsynced
-      const updatedOverrides = { ...localOverrides, [computedForm.snUnit]: computedForm };
+      const overrideKey = computedForm._localId || computedForm.snUnit;
+      const updatedOverrides = { ...localOverrides, [overrideKey]: computedForm };
       setLocalOverrides(updatedOverrides);
       localStorage.setItem('uniquip_local_overrides', JSON.stringify(updatedOverrides));
 
@@ -1153,7 +1171,8 @@ export default function UnitDashboard() {
       localStorage.setItem('uniquip_unsynced_sns', JSON.stringify(cleanUnsynced));
 
       const cleanOverrides = { ...updatedOverrides };
-      delete cleanOverrides[computedForm.snUnit];
+      const deleteKey = computedForm._localId || computedForm.snUnit;
+      delete cleanOverrides[deleteKey];
       setLocalOverrides(cleanOverrides);
       localStorage.setItem('uniquip_local_overrides', JSON.stringify(cleanOverrides));
 
@@ -1189,7 +1208,11 @@ export default function UnitDashboard() {
 
       // We remove locally first
       const deletedSn = unitToDelete.snUnit;
-      setUnits(prev => prev.filter(u => u.snUnit !== deletedSn));
+      const deletedId = unitToDelete._localId;
+      setUnits(prev => prev.filter(u => {
+        if (deletedId && u._localId) return u._localId !== deletedId;
+        return u.snUnit !== deletedSn; // Fallback
+      }));
       
       // Attempt backend proxy delete
       let success = false;
@@ -1299,27 +1322,24 @@ export default function UnitDashboard() {
       return;
     }
 
-    const isDuplicate = units.some(
-      (u) => u.snUnit.trim().toLowerCase() === addForm.snUnit.trim().toLowerCase()
-    );
-    if (isDuplicate) {
-      setAddErrorMsg(`Gagal: Unit dengan SN ${addForm.snUnit} sudah ada dalam database.`);
-      return;
-    }
-
     try {
       setAddLoading(true);
       setAddSuccessMsg(null);
       setAddErrorMsg(null);
 
       // Automatically calculate all dynamic mathematical formulas before saving to Google Sheets
-      const computedForm = enrichUnitWithCalculations(addForm);
+      const localId = `new-${Date.now()}`;
+      const computedForm = enrichUnitWithCalculations({
+        ...addForm,
+        timestamp: Date.now(),
+        _localId: localId
+      });
 
       // 1. Immediately store in local state for instant user feedback
       setUnits((prev) => [computedForm, ...prev]);
 
       // 2. Persist in local overrides and register as unsynced
-      const updatedOverrides = { ...localOverrides, [computedForm.snUnit]: computedForm };
+      const updatedOverrides = { ...localOverrides, [localId]: computedForm };
       setLocalOverrides(updatedOverrides);
       localStorage.setItem('uniquip_local_overrides', JSON.stringify(updatedOverrides));
 
@@ -1390,7 +1410,8 @@ export default function UnitDashboard() {
       localStorage.setItem('uniquip_unsynced_sns', JSON.stringify(cleanUnsynced));
 
       const cleanOverrides = { ...updatedOverrides };
-      delete cleanOverrides[computedForm.snUnit];
+      const deleteKey = computedForm._localId || computedForm.snUnit;
+      delete cleanOverrides[deleteKey];
       setLocalOverrides(cleanOverrides);
       localStorage.setItem('uniquip_local_overrides', JSON.stringify(cleanOverrides));
 
@@ -2730,11 +2751,6 @@ function doPost(e) {
                 <th className="p-1.5 py-2.5 w-[85px] min-w-[85px] max-w-[85px] text-center">SR DATE</th>
                 <th className="p-1.5 py-2.5 text-center w-[65px] min-w-[65px] max-w-[65px]">SR AGING</th>
                 <th className="p-1.5 py-2.5 w-[100px] min-w-[100px] max-w-[100px]">WO NUMBER</th>
-                <th className="p-1.5 py-2.5 w-[70px] min-w-[70px] max-w-[70px] text-center">ID TICKET</th>
-                <th className="p-1.5 py-2.5 w-[80px] min-w-[80px] max-w-[80px]">LABOUR 1</th>
-                <th className="p-1.5 py-2.5 w-[80px] min-w-[80px] max-w-[80px]">LABOUR 2</th>
-                <th className="p-1.5 py-2.5 w-[80px] min-w-[80px] max-w-[80px]">LABOUR 3</th>
-                <th className="p-1.5 py-2.5 w-[80px] min-w-[80px] max-w-[80px]">LABOUR 4</th>
                 <th className="p-1.5 py-2.5 text-center w-[85px] min-w-[85px] max-w-[85px]">REMARKS (KOLOM AF)</th>
                 <th className="p-1.5 py-2.5 text-center w-[70px] min-w-[70px] max-w-[70px]">HM RFU</th>
                 <th className="p-1.5 py-2.5 w-[150px] min-w-[150px] max-w-[150px]">LEAD JOB DESCRIPTION</th>
@@ -2744,7 +2760,7 @@ function doPost(e) {
             <tbody>
               {filteredUnits.length === 0 ? (
                 <tr>
-                  <td colSpan={18} className="p-8 text-center text-slate-500 font-mono text-xs">
+                  <td colSpan={13} className="p-8 text-center text-slate-500 font-mono text-xs">
                     No active breakdown records match the current filter rules.
                   </td>
                 </tr>
@@ -2818,16 +2834,6 @@ function doPost(e) {
                         {u.breakdownWoNumber || '-'}
                       </td>
 
-                      {/* ID TICKET */}
-                      <td className="p-1.5 py-2 font-mono text-indigo-400 text-xs font-bold text-center w-[70px] min-w-[70px] max-w-[70px] truncate">
-                        {u.idTicked || '-'}
-                      </td>
-
-                      {/* LABOUR 1-4 */}
-                      <td className="p-1.5 py-2 text-slate-400 w-[80px] min-w-[80px] max-w-[80px] truncate">{u.labour1 || '-'}</td>
-                      <td className="p-1.5 py-2 text-slate-400 w-[80px] min-w-[80px] max-w-[80px] truncate">{u.labour2 || '-'}</td>
-                      <td className="p-1.5 py-2 text-slate-400 w-[80px] min-w-[80px] max-w-[80px] truncate">{u.labour3 || '-'}</td>
-                      <td className="p-1.5 py-2 text-slate-400 w-[80px] min-w-[80px] max-w-[80px] truncate">{u.labour4 || '-'}</td>
 
                       {/* REMARKS */}
                       <td className="p-1.5 py-2 text-center w-[85px] min-w-[85px] max-w-[85px] truncate">
