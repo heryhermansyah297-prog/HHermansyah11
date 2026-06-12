@@ -354,12 +354,20 @@ const formatUnitStatus = (status: string | null | undefined): string => {
 export default function UnitDashboard() {
   const [units, setUnits] = useState<UnitData[]>([]);
 
+  // Active Tab View State
+  const [activeTab, setActiveTab] = useState<'pm' | 'breakdown'>('pm');
+
   // Automatically compute all dynamic mathematical formulas and ensure freshest appear at top
   const enrichedUnits = useMemo(() => {
     return units
       .map(enrichUnitWithCalculations)
+      .filter(u => {
+        if (activeTab === 'pm' && u.jobStatus === 'DELETED_PM') return false;
+        if (activeTab === 'breakdown' && u.remarks === 'DELETED_BREAKDOWN') return false;
+        return true;
+      })
       .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-  }, [units]);
+  }, [units, activeTab]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -407,8 +415,7 @@ export default function UnitDashboard() {
     return weekOptions[0]?.key || '';
   }, [weekOptions, selectedWeekKey]);
 
-  // Active Tab View State
-  const [activeTab, setActiveTab] = useState<'pm' | 'breakdown'>('pm');
+  // Active Tab View State has been moved up to support enrichedUnits filtering
 
   // States for Editing/Updating Unit
   const [editingUnit, setEditingUnit] = useState<UnitData | null>(null);
@@ -1091,12 +1098,15 @@ export default function UnitDashboard() {
 
       // Automatically calculate all dynamic mathematical formulas before saving to Google Sheets
       const computedForm = enrichUnitWithCalculations(editForm);
+      
+      const newUnitsArray = units.map((item) => 
+        (item._localId && item._localId === editForm._localId) || (!item._localId && item.snUnit === editForm.snUnit) 
+          ? computedForm 
+          : item
+      );
 
       // 1. Immediately store in local state for instant user feedback
-      setUnits((prev) => 
-        prev.map((item) => (item._localId && item._localId === editForm._localId ? computedForm : 
-                          (!item._localId && item.snUnit === editForm.snUnit) ? computedForm : item))
-      );
+      setUnits(newUnitsArray);
 
       // 2. Persist in local overrides and register as unsynced
       const overrideKey = computedForm._localId || computedForm.snUnit;
@@ -1105,8 +1115,8 @@ export default function UnitDashboard() {
       localStorage.setItem('uniquip_local_overrides', JSON.stringify(updatedOverrides));
 
       let updatedUnsynced = [...unsyncedSns];
-      if (!updatedUnsynced.includes(computedForm.snUnit)) {
-        updatedUnsynced.push(computedForm.snUnit);
+      if (!updatedUnsynced.includes(overrideKey)) {
+        updatedUnsynced.push(overrideKey);
       }
       setUnsyncedSns(updatedUnsynced);
       localStorage.setItem('uniquip_unsynced_sns', JSON.stringify(updatedUnsynced));
@@ -1114,13 +1124,18 @@ export default function UnitDashboard() {
       // 3. Attempt synchronous push to Google Sheets
       let success = false;
       let errorMsg = '';
+      
+      const bulkPayload = { 
+        action: 'bulk_sync', 
+        units: newUnitsArray
+      };
 
       // Try Node backend proxy first
       try {
         const res = await fetch('/api/units/update', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(computedForm),
+          body: JSON.stringify(bulkPayload),
         });
         if (res.ok) {
           const resData = await res.json().catch(() => ({}));
@@ -1134,7 +1149,7 @@ export default function UnitDashboard() {
           errorMsg = errData.error || 'Server error';
         }
       } catch (err: any) {
-        console.warn('Backend proxy update failed. Retrying with direct GAS request.', err);
+        console.warn('Backend proxy bulk sync failed. Retrying with direct GAS request.', err);
         errorMsg = err.message || '';
       }
 
@@ -1142,10 +1157,10 @@ export default function UnitDashboard() {
       const activeUrl = gasUrl || localStorage.getItem('uniquip_gas_url') || '';
       if (!success && activeUrl) {
         try {
-          console.log("Direct client-side GAS single push to:", activeUrl);
+          console.log("Direct client-side GAS bulk push to:", activeUrl);
           const response = await fetch(activeUrl, {
             method: 'POST',
-            body: JSON.stringify(computedForm)
+            body: JSON.stringify(bulkPayload)
           });
           if (response.ok) {
             const resData = await response.json();
@@ -1156,7 +1171,7 @@ export default function UnitDashboard() {
             }
           }
         } catch (directErr: any) {
-          console.error('Direct GAS update failed:', directErr);
+          console.error('Direct GAS bulk update failed:', directErr);
           errorMsg = directErr.message || 'Error koneksi jaringan';
         }
       }
@@ -1206,18 +1221,52 @@ export default function UnitDashboard() {
       setDeleteLoading(true);
       setDeleteErrorMsg(null);
 
-      // We remove locally first
       const deletedSn = unitToDelete.snUnit;
       const deletedId = unitToDelete._localId;
-      setUnits(prev => prev.filter(u => {
-        if (deletedId && u._localId) return u._localId !== deletedId;
-        return u.snUnit !== deletedSn; // Fallback
-      }));
-      
-      // Attempt backend proxy delete
+      let deletedCount = 0;
+
+      // Attempt backend proxy delete using bulk sync to ensure exact row mirror and avoid duplicate SN cross-deletion in GAS
       let success = false;
       let errorMsg = '';
-      const deletePayload = { snUnit: deletedSn, action: 'delete' };
+      
+      const newUnitsArray: any[] = [];
+      const hasBreakdownData = (u: any) => u.issueDescription || u.breakdownSrNumber || u.hmRfu || u.leadJobDescription || (u.remarks && u.remarks !== 'DELETED_BREAKDOWN');
+      const hasPmData = (u: any) => u.planSchedulePm || u.smuToRun || u.plannedSmu || u.plannedDate || u.srNumber || (u.jobStatus && u.jobStatus !== 'RFU' && u.jobStatus !== 'DELETED_PM');
+
+      units.forEach(u => {
+        const isTarget = (deletedId && u._localId === deletedId) || (!deletedId && u.snUnit === deletedSn && deletedCount === 0);
+        
+        if (isTarget) {
+          if (!deletedId) deletedCount++;
+          
+          if (activeTab === 'pm') {
+            if (u.remarks === 'DELETED_BREAKDOWN') {
+               // Hard delete (don't push)
+            } else if (hasBreakdownData(u)) {
+               newUnitsArray.push({ ...u, jobStatus: 'DELETED_PM' });
+            } else {
+               // Hard delete since it has no useful breakdown data
+            }
+          } else {
+            if (u.jobStatus === 'DELETED_PM') {
+               // Hard delete
+            } else if (hasPmData(u)) {
+               newUnitsArray.push({ ...u, remarks: 'DELETED_BREAKDOWN' });
+            } else {
+               // Hard delete
+            }
+          }
+        } else {
+          newUnitsArray.push(u);
+        }
+      });
+
+      const deletePayload = { 
+        action: 'bulk_sync', 
+        units: newUnitsArray
+      };
+
+      setUnits(newUnitsArray);
 
       try {
         const res = await fetch('/api/units/update', {
@@ -1259,12 +1308,16 @@ export default function UnitDashboard() {
       }
 
       // Clear unsynced and override reference if deleted
-      const cleanUnsynced = unsyncedSns.filter(sn => sn !== deletedSn);
+      const cleanUnsynced = unsyncedSns.filter(sn => sn !== deletedSn && sn !== deletedId);
       setUnsyncedSns(cleanUnsynced);
       localStorage.setItem('uniquip_unsynced_sns', JSON.stringify(cleanUnsynced));
 
       const cleanOverrides = { ...localOverrides };
-      delete cleanOverrides[deletedSn];
+      if (deletedId) delete cleanOverrides[deletedId];
+      // It's safer to only delete the ID so we don't accidentally drop an override for a duplicate SN.
+      // But we still delete by SN if no ID is present.
+      if (!deletedId) delete cleanOverrides[deletedSn];
+      
       setLocalOverrides(cleanOverrides);
       localStorage.setItem('uniquip_local_overrides', JSON.stringify(cleanOverrides));
 
@@ -1336,7 +1389,8 @@ export default function UnitDashboard() {
       });
 
       // 1. Immediately store in local state for instant user feedback
-      setUnits((prev) => [computedForm, ...prev]);
+      const newUnitsArray = [computedForm, ...units];
+      setUnits(newUnitsArray);
 
       // 2. Persist in local overrides and register as unsynced
       const updatedOverrides = { ...localOverrides, [localId]: computedForm };
@@ -1344,8 +1398,8 @@ export default function UnitDashboard() {
       localStorage.setItem('uniquip_local_overrides', JSON.stringify(updatedOverrides));
 
       let updatedUnsynced = [...unsyncedSns];
-      if (!updatedUnsynced.includes(computedForm.snUnit)) {
-        updatedUnsynced.push(computedForm.snUnit);
+      if (!updatedUnsynced.includes(localId)) {
+        updatedUnsynced.push(localId);
       }
       setUnsyncedSns(updatedUnsynced);
       localStorage.setItem('uniquip_unsynced_sns', JSON.stringify(updatedUnsynced));
@@ -1353,13 +1407,18 @@ export default function UnitDashboard() {
       // 3. Attempt synchronous push to Google Sheets
       let success = false;
       let errorMsg = '';
+      
+      const bulkPayload = { 
+        action: 'bulk_sync', 
+        units: newUnitsArray
+      };
 
       // Try Node backend proxy first
       try {
         const res = await fetch('/api/units/update', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(computedForm),
+          body: JSON.stringify(bulkPayload),
         });
         if (res.ok) {
           const resData = await res.json().catch(() => ({}));
@@ -1373,7 +1432,7 @@ export default function UnitDashboard() {
           errorMsg = errData.error || 'Server error';
         }
       } catch (err: any) {
-        console.warn('Backend proxy update failed. Retrying with direct GAS request.', err);
+        console.warn('Backend proxy bulk sync failed. Retrying with direct GAS request.', err);
         errorMsg = err.message || '';
       }
 
@@ -1381,10 +1440,10 @@ export default function UnitDashboard() {
       const activeUrl = gasUrl || localStorage.getItem('uniquip_gas_url') || '';
       if (!success && activeUrl) {
         try {
-          console.log("Direct client-side GAS single push to:", activeUrl);
+          console.log("Direct client-side GAS bulk push to:", activeUrl);
           const response = await fetch(activeUrl, {
             method: 'POST',
-            body: JSON.stringify(computedForm)
+            body: JSON.stringify(bulkPayload)
           });
           if (response.ok) {
             const resData = await response.json();
@@ -1395,7 +1454,7 @@ export default function UnitDashboard() {
             }
           }
         } catch (directErr: any) {
-          console.error('Direct GAS update failed:', directErr);
+          console.error('Direct GAS bulk update failed:', directErr);
           errorMsg = directErr.message || 'Error koneksi jaringan';
         }
       }
